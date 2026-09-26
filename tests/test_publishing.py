@@ -180,3 +180,29 @@ class PublishTests(unittest.TestCase):
             self.assertTrue(plan.as_dict()["ready"])
             self.assertFalse((self.root / ".modcourier").exists())
             self.assertTrue(all(method == "GET" for method, _ in server.calls))
+
+    def test_stable_release_does_not_collide_with_prerelease(self):
+        self.items[0].path.unlink()
+        jar(self.root, version="1.0.0-beta")
+        self.items = artifacts(self.cfg)
+        with service() as server:
+            _, report = self.run_release(server)
+            self.assertTrue(report["complete"], report)
+            self.items[0].path.unlink()
+            jar(self.root, version="1.0.0", payload=b"stable")
+            self.items = artifacts(self.cfg)
+            _, report = self.run_release(server)
+            self.assertTrue(report["complete"], report)
+            self.assertEqual(server.mr_uploads, 2)
+            self.assertEqual(server.cf_uploads, 2)
+
+    def test_definitively_failed_upload_can_use_corrected_build(self):
+        with service() as server:
+            server.fail_cf = 400
+            self.run_release(server, ["curseforge"])
+            server.fail_cf = None
+            jar(self.root, payload=b"fixed")
+            self.items = artifacts(self.cfg)
+            _, report = self.run_release(server, ["curseforge"])
+            self.assertTrue(report["complete"], report)
+            self.assertEqual(server.cf_uploads, 1)

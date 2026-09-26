@@ -1,4 +1,4 @@
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from .errors import CourierError
 from .models import file_hashes, same_file
@@ -9,7 +9,7 @@ def verify(connector, project, artifact, receipt):
     try:
         fresh_project = connector.get_project(project.id)
         if fresh_project is None:
-            return receipt
+            return replace(receipt, status="accepted_unverified")
         for remote in connector.files(fresh_project):
             if remote.id == receipt.id:
                 if not same_file(artifact, remote):
@@ -19,8 +19,8 @@ def verify(connector, project, artifact, receipt):
         if exc.code == "verification_failed":
             raise
         # A receipt is durable evidence of acceptance, not proof of publication.
-        return receipt
-    return receipt
+        return replace(receipt, status="accepted_unverified")
+    return replace(receipt, status="accepted_unverified")
 
 
 def execute(config, items, state, plan):

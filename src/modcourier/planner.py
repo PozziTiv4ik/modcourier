@@ -39,7 +39,7 @@ def choose_release(artifact, files):
             raise CourierError("browser_required", f"Matching remote file {remote.id} is {remote.status}; check its release state in the author dashboard.")
         return remote
     for remote in files:
-        version_match = re.search(r"(?<![A-Za-z0-9.])v?" + re.escape(artifact.version) + r"(?![A-Za-z0-9.])", remote.label)
+        version_match = re.search(r"(?<![A-Za-z0-9._+-])v?" + re.escape(artifact.version) + r"(?![A-Za-z0-9._+-])", remote.label)
         label_match = remote.label in {artifact.key, artifact.display_name, artifact.version}
         if remote.filename == artifact.path.name or label_match or (version_match and variant_matches(artifact, remote)):
             # Same release identity without the same bytes must never be overwritten.
@@ -83,7 +83,7 @@ def build_plan(config, items, state, selected=None, connectors=None):
                 if matched:
                     actions.append(Step(name, "skip", "The platform already has this file.", project.id, artifact, matched))
                     continue
-                if previous.get("sha256") and previous["sha256"] != artifact.hashes["sha256"]:
+                if previous.get("status") in {"started", "uncertain", "accepted"} and previous.get("sha256") and previous["sha256"] != artifact.hashes["sha256"]:
                     raise CourierError("version_conflict", f"{artifact.key} changed since a previous upload attempt. Resolve that release first.")
                 if previous.get("status") == "accepted" and previous.get("receipt"):
                     receipt = RemoteFile(**previous["receipt"])

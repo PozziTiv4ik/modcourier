@@ -105,3 +105,16 @@ class RecoveryTests(unittest.TestCase):
             plan = build_plan(self.cfg, self.items, state, ["modrinth"], clients)
             self.assertEqual([s.action for s in plan.steps], ["blocked"])
             self.assertEqual(plan.steps[0].details["code"], "policy_blocked")
+
+    def test_old_published_receipt_is_not_a_current_verification(self):
+        with service() as server:
+            clients = connectors(self.cfg, server)
+            state = State(self.root)
+            plan = build_plan(self.cfg, self.items, state, ["modrinth"], clients)
+            execute(self.cfg, self.items, state, plan)
+            server.mr_project = None
+            with patch("modcourier.cli.REGISTRY", {"modrinth": lambda _: clients["modrinth"]}):
+                result = status(self.cfg, state)
+            self.assertEqual(result["results"][0]["status"], "accepted_unverified")
+            self.assertEqual(result["results"][0]["last_known_status"], "published")
+            self.assertFalse(result["results"][0]["verified_now"])

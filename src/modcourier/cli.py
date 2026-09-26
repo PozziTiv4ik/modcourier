@@ -112,7 +112,8 @@ def status(config, state):
                 message = "Verified against the platform."
         except CourierError as exc:
             message = str(exc)
-        results.append({"platform": name, "key": key, "status": receipt["status"],
+        results.append({"platform": name, "key": key, "status": receipt["status"] if fresh else "accepted_unverified",
+                        "last_known_status": operation["receipt"]["status"],
                         "url": receipt["url"], "message": message, "verified_now": fresh is not None})
     return {"schema_version": 1, "results": results,
             "message": "No recorded uploads." if not results else "Recorded release status."}

@@ -70,6 +70,7 @@ def git_source(root: Path):
 
 
 def suggested_config(root, items):
+    root = root.resolve()
     first = items[0]
     deps = sorted({d.mod_id for a in items for d in a.dependencies})
     return {

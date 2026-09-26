@@ -66,14 +66,19 @@ class Http:
                     raise CourierError("invalid_response", "API returned invalid JSON.", uncertain=method != "GET") from exc
             except HTTPError as exc:
                 if exc.code == 404 and missing_ok:
+                    exc.close()
                     return None
                 retryable = exc.code == 429 or exc.code >= 500
                 if retryable and attempt + 1 < attempts:
                     retry_after = exc.headers.get("Retry-After", "")
                     delay = min(10, int(retry_after)) if retry_after.isdigit() else 2 ** attempt
+                    exc.close()
                     self.sleep(delay)
                     continue
-                raw = exc.read(2048).decode("utf-8", "replace")
+                try:
+                    raw = exc.read(2048).decode("utf-8", "replace")
+                finally:
+                    exc.close()
                 try:
                     body = json.loads(raw)
                     raw = str(body.get("description") or body.get("errorMessage") or body.get("message") or raw)
