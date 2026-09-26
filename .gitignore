@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.modcourier/
+.env
+.env.*
+!.env.example
+dist/
+work/
+.venv/
+*.egg-info/

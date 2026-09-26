@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "project": {
+    "mod_id": "your_mod_id",
+    "slug": "your-mod",
+    "title": "Your Mod",
+    "summary": "Explain what your mod adds or changes.",
+    "body_file": "README.md",
+    "license": "MIT",
+    "source_url": "https://github.com/YOUR_ACCOUNT/YOUR_MOD"
+  },
+  "release": {
+    "type": "release",
+    "game_versions": ["1.21.1"],
+    "environment": "client_and_server",
+    "changelog": "Describe the changes in this release."
+  },
+  "artifacts": [
+    {"path": "fabric/build/libs/your-mod-1.0.0.jar"},
+    {"path": "neoforge/build/libs/your-mod-1.0.0.jar"}
+  ],
+  "platforms": {
+    "modrinth": {
+      "enabled": true,
+      "categories": ["utility"],
+      "token_env": "MODRINTH_TOKEN"
+    },
+    "curseforge": {
+      "enabled": true,
+      "author": "YOUR_CURSEFORGE_AUTHOR_NAME",
+      "token_env": "CURSEFORGE_UPLOAD_TOKEN",
+      "api_key_env": "CURSEFORGE_API_KEY"
+    }
+  },
+  "dependencies": {},
+  "policy": {
+    "ai_usage": "unknown"
+  }
+}
