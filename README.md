@@ -6,7 +6,7 @@ ModCourier publishes Minecraft Java mods to **Modrinth** and **CurseForge**.
 It reads built JARs, finds existing projects, prepares a release plan and resumes
 partial deliveries without blindly uploading the same file again.
 
-[Русский](README.ru.md) · [Agent entry point](AGENTS.md) · [Setup](docs/setup.md) · [Configuration](docs/configuration.md) · [Recovery](docs/recovery.md)
+[Agent entry point](AGENTS.md) · [Setup](docs/setup.md) · [Configuration](docs/configuration.md) · [Publication language](docs/publication-language.md) · [Recovery](docs/recovery.md)
 
 ## Give this repository to your agent
 
@@ -16,6 +16,13 @@ partial deliveries without blindly uploading the same file again.
 mod, inspect existing releases, configure the publisher and finish the job.
 The agent uses its existing terminal/browser tools; ModCourier has no model subscription.
 
+**Website publications are English-only.** The agent translates and reviews the
+title, summary, description and release notes even when your conversation or mod
+metadata uses another language. Release names use that English title. The CLI
+requires a review tied to the exact text; later edits invalidate it automatically.
+Neither platform exposes documented native translations for these page fields,
+so ModCourier does not append extra language sections.
+
 ## What works
 
 | Capability | Modrinth | CurseForge |
@@ -23,6 +30,7 @@ The agent uses its existing terminal/browser tools; ModCourier has no model subs
 | Discover and bind existing projects | Author projects, source identity and explicit IDs | Catalog + source/author checks, or author dashboard |
 | Create a first project | Official API, draft then moderation submission | Prepared browser handoff; creation is not in the author Upload API |
 | Publish release files | Official API | Official author Upload API |
+| English project page | Create/update reviewed copy through API | Prepared copy and verified author-website step |
 | Check file identity | SHA-512 / SHA-1 | SHA-1 / MD5 from catalog |
 | Resume after partial failure | Durable journal and remote reconciliation | Durable journal and remote reconciliation |
 | Verify public availability | Version and project status | Catalog file status; hidden/pending files remain unverified |
@@ -36,21 +44,30 @@ into claims about versions you have not tested.
 
 Requires **Python 3.11+**. Windows, Linux and macOS. **Zero third-party Python dependencies.**
 
-Download `modcourier.pyz` from [Releases](https://github.com/PozziTiv4ik/modcourier/releases),
-or clone this repository and use `modcourier.py`. No installation step:
+Use `modcourier.py` from this checkout for the current English-publication workflow.
+No installation step:
 
 ```sh
-python /path/to/modcourier.pyz init --project /path/to/your-mod
-python /path/to/modcourier.pyz inspect --project /path/to/your-mod --json
-python /path/to/modcourier.pyz publish --project /path/to/your-mod --dry-run
-python /path/to/modcourier.pyz publish --project /path/to/your-mod
-python /path/to/modcourier.pyz status --project /path/to/your-mod
+python /path/to/ModCourier/modcourier.py init --project /path/to/your-mod
+# Prepare/read the English copy in modcourier.json and its referenced files, then:
+python /path/to/ModCourier/modcourier.py review-language --language en --project /path/to/your-mod
+python /path/to/ModCourier/modcourier.py inspect --project /path/to/your-mod --json
+python /path/to/ModCourier/modcourier.py publish --project /path/to/your-mod --dry-run
+python /path/to/ModCourier/modcourier.py publish --project /path/to/your-mod
+python /path/to/ModCourier/modcourier.py status --project /path/to/your-mod
 ```
 
 Build **your mod** first with its own build tooling. `init` reads release JARs from
 `build/libs` and immediate submodules, then creates `modcourier.json`. Fill the few
 fields that cannot be inferred: tested versions, client/server behavior, release
 notes, categories, dependency mappings and truthful AI disclosures.
+English text files are preferred when present; imported source text is never
+automatically marked as reviewed.
+
+For a portable single-file copy, run `python scripts/build_release.py` and use
+`dist/modcourier.pyz` with the same commands. The earlier
+[v1.0.0 release](https://github.com/PozziTiv4ik/modcourier/releases/tag/v1.0.0)
+predates the English-publication checks; use this checkout/build for those checks.
 
 Set credentials locally. They are never part of the public configuration:
 
@@ -82,6 +99,7 @@ flowchart LR
 - One platform failed → keep the successful result and resume the unfinished work.
 - A request may have succeeded before timing out → reconcile first.
 - A lookup failed → report uncertainty; never interpret it as an empty account.
+- Website copy is untranslated or changed since review → prepare English copy before any upload.
 
 `inspect` and `publish --dry-run` perform reads only. `publish` records its work in
 `.modcourier/`, writes a report, and prepares `handoff.md` / `handoff.json` if a browser
@@ -93,6 +111,7 @@ step is needed. Accepted, pending moderation and publicly published are distinct
 src/modcourier/
   cli.py           commands and JSON output
   models.py        shared project, artifact and result types
+  publication.py   reviewed English copy shared by APIs and browser handoffs
   inspect.py       local discovery and validation
   planner.py       decisions without remote writes
   runner.py        execution and reconciliation

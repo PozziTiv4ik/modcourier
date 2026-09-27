@@ -16,7 +16,10 @@ may be bound explicitly, but the account must have an accepted membership and th
 platform must permit the requested operation.
 
 For a new project, provide title, summary, body, license and 1–3 Modrinth categories
-in modcourier.json. Category names come from
+in modcourier.json. All page prose and release notes must be English.
+After translating and reading them, run `review-language --language en`.
+The current project title/summary/body are synchronized to this copy for updates.
+Category names come from
 [the official catalog](https://api.modrinth.com/v2/tag/category). An optional icon is
 a local path inside the mod directory. Creation produces a draft, uploads its
 release files, and submits the completed project for moderation.
@@ -70,10 +73,11 @@ document creating a Minecraft project page.
 3. If none is the intended mod, create a Minecraft Java **Mods** project using the
    prepared material in .modcourier/handoff.json.
 4. Copy the numeric project ID and URL slug.
-5. If this is a **new and empty** project, run:
+5. Verify its saved English title, summary and full description against the prepared
+   copy. If this is a **new and empty** project, run:
 
 ```sh
-python modcourier.py bind curseforge 123456 --new --slug my-mod --project /path/to/mod
+python modcourier.py bind curseforge 123456 --new --slug my-mod --page-confirmed --project /path/to/mod
 python modcourier.py publish --project /path/to/mod
 ```
 
@@ -82,16 +86,18 @@ the first upload while the new project is still absent from the public catalog.
 The journal prevents a second upload after acknowledgement. Other versions need
 normal discovery once the project is visible.
 
-For an existing project, omit --new:
+For an existing project, omit --new. After translating and verifying the saved
+page in the browser, include --page-confirmed:
 
 ```sh
-python modcourier.py bind curseforge 123456 --project /path/to/mod
+python modcourier.py bind curseforge 123456 --page-confirmed --project /path/to/mod
 ```
 
 If your existing project cannot be read through the catalog, the agent must check
 and, when necessary, upload via the author website. This path depends on the
 agent's browser tools and signed-in account; the standalone CLI cannot automate
-arbitrary browsers. Use the prepared fields and hashes, then verify file status.
+arbitrary browsers. Use the reviewed English fields and prepared release names,
+then verify file status. Never paste untranslated JAR metadata or source notes.
 
 ## Set credentials without committing them
 

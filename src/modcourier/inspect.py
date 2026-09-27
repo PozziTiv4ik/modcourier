@@ -73,18 +73,20 @@ def suggested_config(root, items):
     root = root.resolve()
     first = items[0]
     deps = sorted({d.mod_id for a in items for d in a.dependencies})
+    body_file = next((name for name in ("README.en.md", "README.md") if (root / name).is_file()), None)
+    changelog_file = next((name for name in ("CHANGELOG.en.md", "CHANGELOG.md") if (root / name).is_file()), None)
     return {
         "schema_version": 1,
         "project": {
             "mod_id": first.mod_id, "slug": first.mod_id.replace("_", "-"), "title": first.title,
             "summary": first.description[:255], "license": first.license,
             "source_url": git_source(root),
-            **({"body_file": "README.md"} if (root / "README.md").exists() else {"body": ""}),
+            **({"body_file": body_file} if body_file else {"body": ""}),
         },
         "release": {
             "type": "release", "game_versions": first.game_versions,
             "environment": first.environment,
-            **({"changelog_file": "CHANGELOG.md"} if (root / "CHANGELOG.md").exists() else {"changelog": ""}),
+            **({"changelog_file": changelog_file} if changelog_file else {"changelog": ""}),
         },
         "artifacts": [{"path": str(a.path.relative_to(root)).replace("\\", "/"),
                        **({"game_versions": a.game_versions} if a.game_versions != first.game_versions else {}),
@@ -97,6 +99,7 @@ def suggested_config(root, items):
         },
         "dependencies": {d: {"modrinth": "", "curseforge": ""} for d in deps},
         "policy": {"ai_usage": "unknown"},
+        "publication": {"language": "en", "reviewed_sha256": ""},
     }
 
 

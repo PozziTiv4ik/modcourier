@@ -35,5 +35,9 @@
   "dependencies": {},
   "policy": {
     "ai_usage": "unknown"
+  },
+  "publication": {
+    "language": "en",
+    "reviewed_sha256": ""
   }
 }

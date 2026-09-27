@@ -5,6 +5,7 @@ from .connectors import REGISTRY
 from .errors import CourierError
 from .inspect import local_issues
 from .models import RemoteFile, Step, same_file
+from .publication import reviewed_publication
 
 
 @dataclass
@@ -12,12 +13,14 @@ class Plan:
     steps: list[Step] = field(default_factory=list)
     projects: dict = field(default_factory=dict)
     connectors: dict = field(default_factory=dict, repr=False)
+    publication_sha256: str = ""
 
     def as_dict(self):
         return {
             "schema_version": 1,
             "ready": not any(s.action in {"blocked", "needs_browser"} for s in self.steps),
             "steps": [s.as_dict() for s in self.steps],
+            "publication_language": "en",
         }
 
 
@@ -55,6 +58,8 @@ def build_plan(config, items, state, selected=None, connectors=None):
         connector = (connectors or {}).get(name) or REGISTRY[name](config)
         plan.connectors[name] = connector
         try:
+            publication = reviewed_publication(config)
+            plan.publication_sha256 = publication.sha256
             if requirements:
                 raise CourierError("release_metadata", " ".join(requirements))
             bound = config.settings(name).get("project_id")
@@ -72,6 +77,7 @@ def build_plan(config, items, state, selected=None, connectors=None):
                 raise CourierError("uncertain_creation", "A previous project creation may have succeeded. Check drafts and bind its ID before continuing.")
             if project is None and not connector.capabilities["create_project"]:
                 raise CourierError("browser_required", "Create or locate the project in the author dashboard, then bind its ID.")
+            page_action = connector.page_action(project) if project else None
             files = connector.files(project) if project else []
             actions = []
             for artifact in items:
@@ -97,11 +103,15 @@ def build_plan(config, items, state, selected=None, connectors=None):
             uploads = [s.artifact for s in actions if s.action == "upload"]
             if uploads:
                 connector.validate(uploads, new=project is None)
-            elif name == "modrinth" and project and project.status == "draft":
+            elif name == "modrinth" and project and (project.status == "draft" or page_action):
                 # Submission still needs policy checks when every file was uploaded earlier.
                 connector.validate(items, new=False)
             if project is None:
                 plan.steps.append(Step(name, "create", "Create a new draft project."))
+            elif page_action:
+                plan.steps.append(Step(name, page_action, "Synchronize the reviewed English project page.", project.id))
+            elif project and state.operation(name + ":update_page").get("status") in {"started", "uncertain", "failed"}:
+                plan.steps.append(Step(name, "verify_page", "The current page matches the reviewed English copy; reconcile the prior update.", project.id))
             plan.steps.extend(actions)
             if name == "modrinth" and (project is None or project.status == "draft"):
                 plan.steps.append(Step(name, "submit", "Submit the complete project for moderation.",

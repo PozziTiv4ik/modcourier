@@ -9,6 +9,8 @@ platform-specific wire format and capabilities.
 2. Implement discover, files, validate, upload and get_project.
 3. Declare capabilities. Implement create_project only for a documented supported
    flow. Return an actionable browser_required error when a website step is needed.
+   Keep page_translations false unless a native locale-aware page interface has
+   been verified. All primary publication copy remains English.
 4. Return RemoteProject and RemoteFile objects. Statuses must distinguish an
    acknowledgement, moderation and public availability.
 5. Register the connector in REGISTRY and the platform name in config.PLATFORMS.
@@ -19,6 +21,11 @@ platform-specific wire format and capabilities.
 Reuse Http for bounded responses, credential redaction, streaming multipart
 uploads and explicit handling of uncertain writes. API hosts are fixed in
 connectors; user config cannot redirect credentials elsewhere.
+
+Use Connector.publication() for every outgoing title, summary, description and
+changelog; its release_name method deliberately avoids untranslated JAR titles.
+Implement page_action/update_page for existing page copy or return a browser
+handoff. Recheck the content review before any remote mutation.
 
 The planner performs reads only. Remote mutations happen in runner, with a
 journal entry persisted **before** each request and a receipt persisted as soon

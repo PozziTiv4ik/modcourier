@@ -14,6 +14,7 @@ from .handoff import prepare
 from .inspect import artifacts, local_issues, suggested_config
 from .models import same_file
 from .planner import build_plan
+from .publication import Publication
 from .runner import execute
 from .state import State, atomic_json
 
@@ -34,12 +35,20 @@ def parser():
     publish.add_argument("--dry-run", action="store_true", help="Read-only plan; no local or remote writes")
     publish.add_argument("--platform", choices=PLATFORMS, action="append")
     commands.add_parser("status", parents=[common], help="Read the current remote status of recorded uploads")
+    review = commands.add_parser(
+        "review-language", parents=[common],
+        help="Record the agent/author's English review of the exact publication text",
+        description="After reading and translating all publication copy, record that it is English. "
+                    "This command does not translate or automatically detect its language.",
+    )
+    review.add_argument("--language", choices=["en"], required=True, help="Attest that you reviewed the copy as English")
     bind = commands.add_parser("bind", parents=[common], help="Save a project ID verified by the author/agent")
     bind.add_argument("platform", choices=PLATFORMS)
     bind.add_argument("project_id")
     bind.add_argument("--new", action="store_true", help="CurseForge only: browser-verified NEW and EMPTY project")
     bind.add_argument("--slug", help="Verified CurseForge URL slug")
     bind.add_argument("--disclosures-confirmed", action="store_true", help="Modrinth: required disclosures were applied in the website")
+    bind.add_argument("--page-confirmed", action="store_true", help="CurseForge: the rendered page matches the reviewed English copy")
     recover = commands.add_parser("recover", parents=[common], help="Resolve an uncertain upload after inspecting the author dashboard")
     recover.add_argument("platform", choices=PLATFORMS)
     recover.add_argument("release_id", help="Exact release ID from inspect/status")
@@ -72,6 +81,11 @@ def emit(value, machine=False):
             lines.append("  " + value["error"]["code"] + ": " + value["error"]["message"])
         if value.get("note"):
             lines.append(value["note"])
+        if value.get("publication"):
+            publication = value["publication"]
+            lines.append("  Publication language: English; " + ("reviewed" if publication["reviewed"] else "translation/review needed"))
+            if publication.get("issue"):
+                lines.append("  " + publication["issue"]["message"])
         output = "\n".join(lines)
     # Defense in depth: never emit active token values, even in platform error text.
     for key, secret in os.environ.items():
@@ -160,8 +174,19 @@ def dispatch(args):
         raw = suggested_config(root, items)
         atomic_json(config.path, raw)
         ensure_ignore(root)
-        return {"message": "Created modcourier.json. Fill missing release details, dependency IDs and AI disclosure information.",
+        return {"message": "Created modcourier.json. Prepare English title, summary, description and changelog; "
+                           "fill release details, then run review-language --language en after reading the copy.",
                 "artifacts": [a.as_dict() for a in items], "config": raw}, 0
+    if args.command == "review-language":
+        if not config.path.exists():
+            raise CourierError("missing_config", "Run init once to create modcourier.json.")
+        with State(root).lock():
+            config = Config(root)
+            publication = Publication.read(config).validate(config, require_review=False)
+            config.raw["publication"] = {"language": "en", "reviewed_sha256": publication.sha256}
+            atomic_json(config.path, config.raw)
+        return {"message": "Recorded your English-language review. Changes to the text require a new review.",
+                "publication": publication.preview(config)}, 0
     if args.command == "status":
         return status(config, State(root)), 0
     if args.command == "bind":
@@ -188,6 +213,10 @@ def dispatch(args):
                 if args.platform != "modrinth":
                     raise CourierError("invalid_argument", "--disclosures-confirmed applies to Modrinth.")
                 extra["disclosures_confirmed"] = True
+            if args.page_confirmed:
+                if args.platform != "curseforge":
+                    raise CourierError("invalid_argument", "--page-confirmed applies to CurseForge.")
+                extra["page_review"] = REGISTRY["curseforge"](config).confirm_page(args.project_id)
             config.bind(args.platform, args.project_id, **extra)
             Config(root)  # Validate the persisted binding before it can be used.
             state.bind(args.platform, args.project_id)
@@ -198,12 +227,14 @@ def dispatch(args):
     items = artifacts(config)
     if args.command == "inspect" and args.offline:
         return {"schema_version": 1, "artifacts": [a.as_dict() for a in items],
+                "publication": Publication.read(config).preview(config),
                 "issues": local_issues(config, items), "message": "Local inspection; platforms were not contacted."}, 0
     if not config.path.exists():
         raise CourierError("missing_config", "Run init once to create modcourier.json.")
     if args.command == "inspect" or args.dry_run:
         plan = build_plan(config, items, State(root), args.platform)
-        return {**plan.as_dict(), "artifacts": [a.as_dict() for a in items]}, 0 if plan.as_dict()["ready"] else 2
+        return {**plan.as_dict(), "artifacts": [a.as_dict() for a in items],
+                "publication": Publication.read(config).preview(config)}, 0 if plan.as_dict()["ready"] else 2
     with State(root).lock():
         # All reads involved in a publish are repeated under the exclusive lock.
         config = Config(root)

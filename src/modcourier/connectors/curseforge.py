@@ -6,6 +6,7 @@ from ..config import repo_url
 from ..errors import CourierError
 from ..http import Http
 from ..models import RemoteFile, RemoteProject
+from ..publication import check_copy, digest
 
 FILE_STATUSES = {
     1: "pending_moderation", 2: "pending_moderation", 3: "pending_moderation",
@@ -151,6 +152,7 @@ class CurseForge(Connector):
                 raise CourierError("listing_incomplete", "CurseForge's file window was exhausted. Cannot prove a release is absent.")
 
     def validate(self, artifacts, *, new=False):
+        publication = self.publication()
         if not self.token:
             raise CourierError("missing_token", "Set CURSEFORGE_UPLOAD_TOKEN (or configured token_env) in the local environment.")
         versions = self.upload_api.get("/game/versions")
@@ -181,22 +183,66 @@ class CurseForge(Connector):
                     raise CourierError("missing_dependency", f"Cannot resolve CurseForge dependency {target}.")
                 relations.append({"projectID": dependency.id, "slug": dependency.slug, "type": RELATIONS[kind]})
             self.metadata[artifact.key] = {
-                "displayName": artifact.display_name, "changelog": self.config.text("release", "changelog"),
+                "displayName": publication.release_name(artifact), "changelog": publication.changelog,
                 "changelogType": "markdown", "gameVersionNames": [names[tag.casefold()] for tag in tags],
                 "releaseType": self.config.release.get("type", "release"),
                 "relations": {"projects": relations}, "isMarkedForManualRelease": False,
             }
 
     def upload(self, project, artifact):
+        publication = self.publication()
+        metadata = {**self.metadata[artifact.key],
+                    "displayName": publication.release_name(artifact), "changelog": publication.changelog}
         response = self.upload_api.multipart(
             "/projects/" + segment(project.id) + "/upload-file",
-            {"metadata": self.metadata[artifact.key]},
+            {"metadata": metadata},
             [("file", artifact.path, artifact.hashes["sha256"])],
         )
         if not isinstance(response, dict) or not isinstance(response.get("id"), int):
             raise CourierError("invalid_response", "CurseForge did not return an uploaded file ID.", uncertain=True)
         return RemoteFile(
-            str(response["id"]), artifact.display_name, artifact.path.name, artifact.hashes,
+            str(response["id"]), publication.release_name(artifact), artifact.path.name, artifact.hashes,
             "accepted_unverified", f"https://www.curseforge.com/minecraft/mc-mods/{project.slug}/files/{response['id']}",
             artifact.loaders, artifact.game_versions,
+        )
+
+    def page_copy(self, project):
+        self.require_key()
+        response = self.api.get("/v1/mods/" + segment(project.id) + "/description")
+        body = response.get("data")
+        if not isinstance(body, str):
+            raise CourierError("invalid_response", "CurseForge did not return its project description.")
+        return {"title": project.title, "summary": project.raw.get("summary", ""), "body": body}
+
+    def confirm_page(self, project_id):
+        """Record the caller's browser review; HTML may differ from source Markdown."""
+        publication = self.publication()
+        project = self.get_project(project_id) if self.key else None
+        remote_digest = ""
+        if project:
+            fields = self.page_copy(project)
+            check_copy(fields)
+            if fields["title"] != publication.title or fields["summary"] != publication.summary:
+                raise CourierError("page_unverified", "CurseForge title/summary still differ from the reviewed English copy. Save the page and wait for its API view to update.")
+            remote_digest = digest(fields)
+        return {"sha256": publication.page_sha256, "remote_sha256": remote_digest}
+
+    def page_action(self, project):
+        publication = self.publication()
+        review = self.settings.get("page_review", {})
+        if project.raw.get("bootstrap"):
+            if review.get("sha256") == publication.page_sha256:
+                return None
+        else:
+            fields = self.page_copy(project)
+            if fields == publication.page:
+                return None
+            if (review.get("sha256") == publication.page_sha256
+                and review.get("remote_sha256") == digest(fields)):
+                return None
+        raise CourierError(
+            "browser_required",
+            "Set the CurseForge page title, summary and description to the reviewed English copy. "
+            "Check the rendered page, then run bind curseforge PROJECT_ID --page-confirmed. "
+            "The author Upload API cannot edit the project page."
         )

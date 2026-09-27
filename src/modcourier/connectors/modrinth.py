@@ -10,7 +10,7 @@ from ..models import RemoteFile, RemoteProject, file_hashes
 
 class Modrinth(Connector):
     name = "modrinth"
-    capabilities = {"create_project": True, "upload": True, "discover": True}
+    capabilities = {"create_project": True, "upload": True, "discover": True, "page_translations": False}
 
     def __init__(self, config, http=None):
         super().__init__(config)
@@ -94,6 +94,7 @@ class Modrinth(Connector):
         return result
 
     def validate(self, artifacts, *, new=False):
+        self.publication()
         self.authenticated()
         policy = self.config.raw.get("policy", {}).get("ai_usage", "unknown")
         if policy == "primary":
@@ -142,10 +143,11 @@ class Modrinth(Connector):
                     raise CourierError("project_metadata", "project.icon file is missing.")
 
     def create_project(self, artifacts):
+        publication = self.publication()
         values = self.config.project
         data = {
-            "slug": values["slug"], "title": values["title"], "description": values["summary"],
-            "body": self.config.text("project", "body"), "categories": self.settings["categories"],
+            "slug": values["slug"], "title": publication.title, "description": publication.summary,
+            "body": publication.body, "categories": self.settings["categories"],
             "license_id": values["license"], "license_url": values.get("license_url"),
             "project_type": "mod", "initial_versions": [], "is_draft": True,
             "client_side": "optional", "server_side": "optional",
@@ -163,9 +165,10 @@ class Modrinth(Connector):
         return self.project(response)
 
     def upload(self, project, artifact):
+        publication = self.publication()
         data = {
-            "project_id": project.id, "name": artifact.display_name, "version_number": artifact.key,
-            "changelog": self.config.text("release", "changelog"),
+            "project_id": project.id, "name": publication.release_name(artifact), "version_number": artifact.key,
+            "changelog": publication.changelog,
             "dependencies": self.dependencies[artifact.key], "game_versions": artifact.game_versions,
             "version_type": self.config.release.get("type", "release"), "loaders": artifact.loaders,
             "featured": True, "file_parts": ["file"], "primary_file": "file",
@@ -183,6 +186,7 @@ class Modrinth(Connector):
         )
 
     def submit(self, project):
+        self.publication()
         current = self.get_project(project.id)
         if not current:
             raise CourierError("project_inaccessible", "Cannot verify the Modrinth project's submission status.")
@@ -193,3 +197,18 @@ class Modrinth(Connector):
         if current.status == "processing":
             return "pending_moderation"
         return current.status
+
+    def page_action(self, project):
+        publication = self.publication()
+        expected = {"title": publication.title, "description": publication.summary, "body": publication.body}
+        return "update_page" if any(project.raw.get(key) != value for key, value in expected.items()) else None
+
+    def update_page(self, project):
+        publication = self.publication()
+        self.http.json("PATCH", "/project/" + segment(project.id), {
+            "title": publication.title, "description": publication.summary, "body": publication.body,
+        })
+        current = self.get_project(project.id)
+        if current is None or self.page_action(current):
+            raise CourierError("page_unverified", "Modrinth accepted the page update, but its English copy is not yet verified.", uncertain=True)
+        return current

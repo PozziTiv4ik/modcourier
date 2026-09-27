@@ -37,11 +37,11 @@ class Config:
         self.raw = read_json(self.path) if raw is None else raw
         if not isinstance(self.raw, dict) or self.raw.get("schema_version", 1) != 1:
             raise CourierError("config_version", "modcourier.json must be a schema_version: 1 object.")
-        allowed = {"schema_version", "project", "release", "artifacts", "platforms", "dependencies", "policy"}
+        allowed = {"schema_version", "project", "release", "artifacts", "platforms", "dependencies", "policy", "publication"}
         unknown = set(self.raw) - allowed
         if unknown:
             raise CourierError("unknown_config", f"Unknown configuration fields: {', '.join(sorted(unknown))}")
-        for field in ("project", "release", "platforms", "dependencies", "policy"):
+        for field in ("project", "release", "platforms", "dependencies", "policy", "publication"):
             if not isinstance(self.raw.get(field, {}), dict):
                 raise CourierError("invalid_config", f"{field} must be an object.")
         fields = {
@@ -49,12 +49,21 @@ class Config:
                         "issues_url", "wiki_url", "discord_url", "body", "body_file", "icon"},
             "release": {"type", "game_versions", "environment", "changelog", "changelog_file"},
             "policy": {"ai_usage"},
+            "publication": {"language", "reviewed_sha256"},
         }
         for section, names in fields.items():
             if set(self.raw.get(section, {})) - names:
                 raise CourierError("unknown_config", f"Unknown fields in {section}: {sorted(set(self.raw[section]) - names)}")
         if any(not isinstance(v, str) for v in self.project.values()):
             raise CourierError("invalid_config", "All project fields must be strings.")
+        publication = self.raw.get("publication", {})
+        if publication.get("language", "en") != "en":
+            raise CourierError("publication_language", "Website publications must use English (publication.language: en).")
+        if "reviewed_sha256" in publication and (
+            not isinstance(publication["reviewed_sha256"], str)
+            or not re.fullmatch(r"[a-f0-9]{64}|", publication["reviewed_sha256"])
+        ):
+            raise CourierError("invalid_config", "publication.reviewed_sha256 must be a SHA-256 hash written by review-language.")
         for field in ("source_url", "issues_url", "wiki_url", "discord_url", "license_url"):
             value = self.project.get(field)
             if value:
@@ -75,9 +84,15 @@ class Config:
             if name not in PLATFORMS or not isinstance(settings, dict):
                 raise CourierError("invalid_platform", f"Unsupported platform configuration: {name}")
             allowed_settings = {"enabled", "project_id", "slug", "author", "token_env", "api_key_env",
-                                "categories", "bootstrap_version", "disclosures_confirmed"}
+                                "categories", "bootstrap_version", "disclosures_confirmed", "page_review"}
             if set(settings) - allowed_settings:
                 raise CourierError("unknown_config", f"Unknown {name} settings: {sorted(set(settings) - allowed_settings)}")
+            if "page_review" in settings:
+                review = settings["page_review"]
+                if (name != "curseforge" or not isinstance(review, dict)
+                    or set(review) != {"sha256", "remote_sha256"}
+                    or any(not isinstance(v, str) or not re.fullmatch(r"[a-f0-9]{64}|", v) for v in review.values())):
+                    raise CourierError("invalid_config", "CurseForge page_review must be recorded by bind --page-confirmed.")
             for key in ("enabled", "disclosures_confirmed"):
                 if key in settings and not isinstance(settings[key], bool):
                     raise CourierError("invalid_config", f"{name}.{key} must be true or false.")

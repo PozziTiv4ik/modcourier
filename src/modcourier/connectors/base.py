@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from urllib.parse import quote
 
 from ..errors import CourierError
+from ..publication import reviewed_publication
 
 
 def segment(value):
@@ -10,11 +11,21 @@ def segment(value):
 
 class Connector(ABC):
     name = ""
-    capabilities = {"create_project": False, "upload": True, "discover": True}
+    capabilities = {"create_project": False, "upload": True, "discover": True, "page_translations": False}
 
     def __init__(self, config):
         self.config = config
         self.settings = config.settings(self.name)
+
+    def publication(self):
+        return reviewed_publication(self.config)
+
+    def page_action(self, project):
+        """Return update_page when the reviewed copy must be synchronized."""
+        return None
+
+    def update_page(self, project):
+        raise CourierError("browser_required", f"Update {self.name}'s project page in the author website.")
 
     @abstractmethod
     def discover(self): ...

@@ -9,6 +9,7 @@ from modcourier.inspect import artifacts
 from modcourier.planner import build_plan
 from modcourier.runner import execute
 from modcourier.state import State
+from modcourier.publication import Publication
 
 
 class PublishTests(unittest.TestCase):
@@ -122,6 +123,9 @@ class PublishTests(unittest.TestCase):
 
     def test_new_empty_cf_binding_allows_first_upload_then_no_duplicates(self):
         self.cfg.settings("curseforge")["bootstrap_version"] = "1.0.0"
+        self.cfg.settings("curseforge")["page_review"] = {
+            "sha256": Publication.read(self.cfg).page_sha256, "remote_sha256": "",
+        }
         with service() as server:
             server.cf_visible = False
             _, report = self.run_release(server, ["curseforge"])

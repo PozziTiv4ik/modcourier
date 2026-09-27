@@ -13,6 +13,7 @@ from modcourier.config import Config
 from modcourier.connectors.curseforge import CurseForge
 from modcourier.connectors.modrinth import Modrinth
 from modcourier.http import Http
+from modcourier.publication import Publication
 
 
 def jar(root, loader="fabric", version="1.0.0", name=None, payload=b"demo", minecraft="1.21.1", deps=None):
@@ -40,7 +41,7 @@ def jar(root, loader="fabric", version="1.0.0", name=None, payload=b"demo", mine
 
 
 def config(root, *, bound=True):
-    return Config(root, {
+    cfg = Config(root, {
         "schema_version": 1,
         "project": {"mod_id": "demo", "title": "Demo", "slug": "demo",
                     "summary": "A test mod.", "body": "A complete test description.",
@@ -52,11 +53,18 @@ def config(root, *, bound=True):
         },
         "policy": {"ai_usage": "none"},
     })
+    review_copy(cfg)
+    return cfg
+
+
+def review_copy(cfg):
+    cfg.raw["publication"] = {"language": "en", "reviewed_sha256": Publication.read(cfg).sha256}
 
 
 class Service:
     def __init__(self):
         self.mr_project = {"id": "mr1", "slug": "demo", "title": "Demo", "status": "approved",
+                           "description": "A test mod.", "body": "A complete test description.",
                            "source_url": "https://github.com/author/demo"}
         self.mr_versions = []
         self.cf_files = []
@@ -69,10 +77,17 @@ class Service:
         self.mr_uploads = 0
         self.cf_uploads = 0
         self.pages = None
+        self.cf_title = "Demo"
+        self.cf_summary = "A test mod."
+        self.cf_body = "A complete test description."
+        self.cf_upload_metadata = []
+        self.page_updates = 0
+        self.lose_page_response = False
 
     @property
     def cf_project(self):
-        return {"id": self.cf_project_id, "slug": "demo", "name": "Demo", "gameId": 432, "classId": 6,
+        return {"id": self.cf_project_id, "slug": "demo", "name": self.cf_title,
+                "summary": self.cf_summary, "gameId": 432, "classId": 6,
                 "status": 4, "authors": [{"name": "author"}], "links": {
                     "websiteUrl": "https://www.curseforge.com/minecraft/mc-mods/demo",
                     "sourceUrl": "https://github.com/author/demo",
@@ -108,12 +123,19 @@ class Service:
                 if p == "/project/mr1/version":
                     return 200, self.mr_versions, {}
             if method == "PATCH" and p == "/project/mr1":
-                self.mr_project["status"] = json.loads(raw)["status"]
+                data = json.loads(raw)
+                self.mr_project.update(data)
+                if "body" in data:
+                    self.page_updates += 1
+                    if self.lose_page_response:
+                        self.lose_page_response = False
+                        return 503, {"message": "page saved, response lost"}, {}
                 return 204, None, {}
             parts = parse_multipart(headers, raw) if raw else {}
             if method == "POST" and p == "/project":
                 data = json.loads(parts["data"])
                 self.mr_project = {"id": "mr1", "slug": data["slug"], "title": data["title"], "status": "draft",
+                                   "description": data["description"], "body": data["body"],
                                    "source_url": data.get("source_url", "")}
                 self.mr_creates += 1
                 return 200, self.mr_project, {}
@@ -135,6 +157,7 @@ class Service:
                 return self.fail_cf, {"message": "simulated failure"}, {}
             parts = parse_multipart(headers, raw)
             data = json.loads(parts["metadata"])
+            self.cf_upload_metadata.append(data)
             file = parts["file"]
             self.cf_uploads += 1
             result = {"id": 100 + self.cf_uploads, "displayName": data["displayName"], "fileName": parts["filename"],
@@ -147,6 +170,8 @@ class Service:
             return 200, {"id": result["id"]}, {}
         if path_only == "/cf/v1/mods/42":
             return (200, {"data": self.cf_project}, {}) if self.cf_visible else (404, {}, {})
+        if path_only == "/cf/v1/mods/42/description":
+            return 200, {"data": self.cf_body}, {}
         if path_only == "/cf/v1/mods/42/files":
             if self.pages is not None:
                 index = int(dict(parse_qsl(urlsplit(path).query)).get("index", 0))

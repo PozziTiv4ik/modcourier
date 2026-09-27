@@ -2,6 +2,7 @@ from dataclasses import asdict, replace
 
 from .errors import CourierError
 from .models import file_hashes, same_file
+from .publication import reviewed_publication
 from .state import atomic_json, now
 
 
@@ -32,6 +33,7 @@ def execute(config, items, state, plan):
         connector = plan.connectors[name]
         project = projects.get(name)
         base = {"platform": name, "action": step.action, "key": step.key}
+        journal_key = name + ":update_page" if step.action == "verify_page" else step.key
         if step.action in {"blocked", "needs_browser"}:
             results.append({**base, "status": step.action, "message": step.reason, **step.details})
             failed_platforms.add(name)
@@ -40,6 +42,8 @@ def execute(config, items, state, plan):
             results.append({**base, "status": "not_attempted", "message": "An earlier step on this platform needs attention."})
             continue
         try:
+            if reviewed_publication(config).sha256 != plan.publication_sha256:
+                raise CourierError("publication_changed", "Publication text changed after planning. Inspect the release again.")
             if step.action == "create":
                 state.record(step.key, status="started")
                 project = connector.create_project(items)
@@ -50,6 +54,18 @@ def execute(config, items, state, plan):
                 config.bind(name, project.id)
                 connector.settings = config.settings(name)
                 results.append({**base, "status": "draft_created", "url": project.url, "project_id": project.id})
+            elif step.action == "update_page":
+                state.record(step.key, status="started", project_id=project.id)
+                project = connector.update_page(project)
+                projects[name] = project
+                state.record(step.key, status="accepted", language="en")
+                results.append({**base, "status": "page_updated", "url": project.url, "language": "en"})
+            elif step.action == "verify_page":
+                current = connector.get_project(project.id)
+                if current is None or connector.page_action(current):
+                    raise CourierError("page_unverified", "The page changed during verification. Inspect again.")
+                state.record(name + ":update_page", status="accepted", language="en")
+                results.append({**base, "status": "page_verified", "url": current.url, "language": "en"})
             elif step.action in {"upload", "skip"}:
                 if project is None:
                     raise CourierError("missing_project", "Cannot upload without a verified project.")
@@ -78,16 +94,16 @@ def execute(config, items, state, plan):
         except CourierError as exc:
             # Do not replace a confirmed upload receipt with an ordinary read error.
             if step.action != "skip":
-                state.record(step.key, status="uncertain" if exc.uncertain else "failed", error=exc.as_dict())
+                state.record(journal_key, status="uncertain" if exc.uncertain else "failed", error=exc.as_dict())
             results.append({**base, "status": "uncertain" if exc.uncertain else "failed", **exc.as_dict()})
             failed_platforms.add(name)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             # A local failure after a POST must not turn the next run into a duplicate upload.
-            record = state.operation(step.key)
+            record = state.operation(journal_key)
             uncertain = record.get("status") in {"started", "accepted"}
             error = CourierError("local_error", f"Operation could not finish: {type(exc).__name__}. Keep the journal and inspect again.",
                                  uncertain=uncertain)
-            state.record(step.key, status="uncertain" if uncertain else "failed", error=error.as_dict())
+            state.record(journal_key, status="uncertain" if uncertain else "failed", error=error.as_dict())
             results.append({**base, "status": "uncertain" if uncertain else "failed", **error.as_dict()})
             failed_platforms.add(name)
     report = {

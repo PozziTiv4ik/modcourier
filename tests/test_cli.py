@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from tests.helpers import jar
+from tests.helpers import config, connectors, jar, review_copy, service
+from modcourier.config import Config
 from modcourier.cli import main
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +56,9 @@ class CliTests(unittest.TestCase):
         path = self.root / "modcourier.json"
         raw = json.loads(path.read_text())
         raw["release"]["changelog"] = "A change"
+        raw["project"]["body"] = "A complete test description."
         raw["policy"]["ai_usage"] = "none"
+        review_copy(Config(self.root, raw))
         path.write_text(json.dumps(raw))
         with patch.dict("os.environ", {"MODRINTH_TOKEN": ""}):
             code, data = self.call("inspect", "--platform", "modrinth")
@@ -74,3 +77,28 @@ class CliTests(unittest.TestCase):
             code = main(["--project", str(self.root), "--json", "inspect", "--offline"])
         self.assertEqual(code, 0)
         self.assertIn("artifacts", json.loads(output.getvalue()))
+
+    def test_page_confirmation_records_browser_verified_html(self):
+        cfg = config(self.root)
+        cfg.path.write_text(json.dumps(cfg.raw), encoding="utf-8")
+        with service() as server:
+            server.cf_body = "<p>A complete test description.</p>"
+            cf = connectors(cfg, server)["curseforge"]
+            with patch("modcourier.cli.REGISTRY", {"curseforge": lambda _: cf}):
+                code, result = self.call("bind", "curseforge", "42", "--page-confirmed")
+            self.assertEqual(code, 0, result)
+            review = Config(self.root).settings("curseforge")["page_review"]
+            self.assertEqual(len(review["sha256"]), 64)
+            self.assertEqual(len(review["remote_sha256"]), 64)
+
+    def test_page_confirmation_does_not_change_config_if_remote_copy_differs(self):
+        cfg = config(self.root)
+        cfg.path.write_text(json.dumps(cfg.raw), encoding="utf-8")
+        original = cfg.path.read_bytes()
+        with service() as server:
+            server.cf_title = "Another Title"
+            cf = connectors(cfg, server)["curseforge"]
+            with patch("modcourier.cli.REGISTRY", {"curseforge": lambda _: cf}):
+                code, result = self.call("bind", "curseforge", "42", "--page-confirmed")
+            self.assertEqual(code, 2, result)
+            self.assertEqual(cfg.path.read_bytes(), original)

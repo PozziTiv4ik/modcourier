@@ -9,25 +9,39 @@ See [examples/modcourier.json](../examples/modcourier.json) for a complete examp
 | Field | Purpose |
 |---|---|
 | `mod_id` | Must match the built JAR |
-| `title`, `slug`, `summary` | Project page identity |
-| `body` or `body_file` | Long project description; UTF-8 Markdown |
+| `title`, `summary` | English project-page copy |
+| `slug` | Stable project URL identity; do not rename it to translate prose |
+| `body` or `body_file` | English project description; UTF-8 Markdown |
 | `license` | SPDX ID, ARR, or LicenseRef-Custom; keep the author's actual license |
 | `license_url` | Required with LicenseRef-Custom |
 | `source_url` | Repository URL used to verify discovery matches |
 | `issues_url`, `wiki_url`, `discord_url` | Optional project links |
 | `icon` | Optional local icon path, relative to the mod directory |
 
-New Modrinth pages are created from these fields. Existing page prose, icons and
-licenses are preserved during a normal release. Edit those on the website when
-desired; publishing a new JAR does not silently rewrite the project's identity.
+New Modrinth pages are created from these fields; existing title/summary/body are
+synchronized to the reviewed English copy. CurseForge page edits use the prepared
+browser handoff. Preserve existing useful content while translating. Icons,
+licenses, IDs and slugs are not changed by a page-copy update.
+
+## Publication language
+
+`publication.language` is fixed to `en`. After preparing and reading all outgoing
+copy, run `review-language --language en`. It writes `publication.reviewed_sha256`;
+do not invent this hash or mark untranslated text as reviewed. Later edits to
+the title, summary, body or changelog require another review.
+
+The agent performs the translation/review itself. The CLI enforces its recorded
+content fingerprint and checks for obvious non-Latin prose; it is not an English
+language detector. See [publication language](publication-language.md).
 
 ## Release and artifacts
 
 - `release.type`: release, beta or alpha.
 - `release.game_versions`: exact versions actually tested, such as ["1.21.1"].
 - `release.environment`: select the client's/server's real requirements.
-- `release.changelog` or `changelog_file`: notes for **this** release. init may
-  suggest CHANGELOG.md; extract the current section if that file includes history.
+- `release.changelog` or `changelog_file`: English notes for **this** release.
+  init prefers CHANGELOG.en.md, then CHANGELOG.md; translate and extract the current
+  section if the source uses another language or includes history.
 
 The environment values are:
 
@@ -100,12 +114,16 @@ Both platforms are enabled by default. Use `enabled: false` or the repeatable
 
 - Both: project_id, token_env.
 - Modrinth: categories and disclosures_confirmed.
-- CurseForge: author, slug, api_key_env and bootstrap_version.
+- CurseForge: author, slug, api_key_env, bootstrap_version and page_review.
 
 Use `bind` to save project IDs and browser confirmations. bootstrap_version is
 written by `bind curseforge ID --new`; it asserts that the new author project was
 empty at that inspected version. It is not a switch for treating failed lookups
 as empty projects.
+
+`bind curseforge ID --page-confirmed` records the rendered page's correspondence
+to the reviewed English copy. It writes page_review (expected and, when available,
+observed remote digests). Editing the copy or remote page requires a new check.
 
 ## Files and JSON output
 
