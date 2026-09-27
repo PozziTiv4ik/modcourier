@@ -44,7 +44,7 @@ class RecoveryTests(unittest.TestCase):
             execute(self.cfg, self.items, state, plan)
             args = argparse.Namespace(platform="curseforge", release_id=self.items[0].key,
                                       absent=False, file_id="101", evidence="Author Files tab checked")
-            with patch("modcourier.cli.REGISTRY", {"curseforge": lambda _: clients["curseforge"]}):
+            with patch("modcourier.recovery.REGISTRY", {"curseforge": lambda _: clients["curseforge"]}):
                 recover(self.cfg, state, args)
             self.assertEqual(state.operation("curseforge:" + self.items[0].key)["status"], "accepted")
 
@@ -56,7 +56,7 @@ class RecoveryTests(unittest.TestCase):
             execute(self.cfg, self.items, state, plan)
             self.items[0].path.unlink()
             server.cf_files[0]["fileStatus"] = 10
-            with patch("modcourier.cli.REGISTRY", {name: (lambda _, c=c: c) for name, c in clients.items()}):
+            with patch("modcourier.recovery.REGISTRY", {name: (lambda _, c=c: c) for name, c in clients.items()}):
                 result = status(self.cfg, state)
             self.assertTrue(all(r["verified_now"] for r in result["results"]))
             self.assertTrue(all(r["status"] == "published" for r in result["results"]))
@@ -113,7 +113,7 @@ class RecoveryTests(unittest.TestCase):
             plan = build_plan(self.cfg, self.items, state, ["modrinth"], clients)
             execute(self.cfg, self.items, state, plan)
             server.mr_project = None
-            with patch("modcourier.cli.REGISTRY", {"modrinth": lambda _: clients["modrinth"]}):
+            with patch("modcourier.recovery.REGISTRY", {"modrinth": lambda _: clients["modrinth"]}):
                 result = status(self.cfg, state)
             self.assertEqual(result["results"][0]["status"], "accepted_unverified")
             self.assertEqual(result["results"][0]["last_known_status"], "published")

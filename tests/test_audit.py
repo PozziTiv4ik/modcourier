@@ -128,7 +128,7 @@ class AuditTests(unittest.TestCase):
             state.record("modrinth:" + self.items[0].key, status="uncertain")
             server.mr_project = None
             clients = connectors(self.cfg, server)
-            with patch("modcourier.cli.REGISTRY", {"modrinth": lambda _: clients["modrinth"]}):
+            with patch("modcourier.recovery.REGISTRY", {"modrinth": lambda _: clients["modrinth"]}):
                 result = status(self.cfg, state)
             self.assertEqual(result["results"][0]["status"], "uncertain")
 
@@ -245,7 +245,7 @@ class AuditTests(unittest.TestCase):
             self.publish(server, ["modrinth"])
             server.mr_versions[0]["files"][0]["hashes"]["sha512"] = "0" * 128
             clients = connectors(self.cfg, server)
-            with patch("modcourier.cli.REGISTRY", {"modrinth": lambda _: clients["modrinth"]}):
+            with patch("modcourier.recovery.REGISTRY", {"modrinth": lambda _: clients["modrinth"]}):
                 result = status(self.cfg, State(self.root))
             self.assertFalse(result["results"][0]["verified_now"])
             self.assertEqual(result["results"][0]["status"], "uncertain")

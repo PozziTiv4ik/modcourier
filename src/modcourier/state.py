@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 
 from .errors import CourierError
@@ -48,9 +49,19 @@ class State:
             raise CourierError("state_version", "Unsupported state version; keep the journal and upgrade ModCourier.")
         if not isinstance(self.data.get("operations"), dict) or not isinstance(self.data.get("projects"), dict):
             raise CourierError("invalid_state", "Invalid journal. Restore it before publishing.")
-        if any(not isinstance(v, dict) for v in self.data["operations"].values()):
-            raise CourierError("invalid_state", "Invalid operation in the journal. Restore it before publishing.")
-        for operation in self.data["operations"].values():
+        if any(not isinstance(v, str) or not v for v in self.data["projects"].values()):
+            raise CourierError("invalid_state", "Invalid project binding in the journal. Restore it before publishing.")
+        for key, operation in self.data["operations"].items():
+            if (not re.fullmatch(r"[a-z][a-z0-9_]*:[A-Za-z0-9_.+-]+", key)
+                or not isinstance(operation, dict)
+                or not isinstance(operation.get("status"), str)
+                or operation["status"] not in {"started", "accepted", "uncertain", "failed"}
+                or ("project_id" in operation and (not isinstance(operation["project_id"], str) or not operation["project_id"]))
+                or ("sha256" in operation and (not isinstance(operation["sha256"], str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", operation["sha256"])))
+                or ("error" in operation and (not isinstance(operation["error"], dict)
+                    or not all(isinstance(operation["error"].get(field), str) for field in ("code", "message"))))):
+                raise CourierError("invalid_state", "Invalid operation in the journal. Restore it before publishing.")
             if operation.get("receipt") is not None:
                 try:
                     RemoteFile(**operation["receipt"])

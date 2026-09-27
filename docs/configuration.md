@@ -145,13 +145,16 @@ not configurable.
   a local check, not remote authorization or permission to publish.
 - inspect / dry-run: ready, steps, artifacts and next_actions.
 - publish: complete, results, completion time and next_actions.
-- status: results with verified_now for fresh platform verification.
+- status: results with verified_now for fresh hash and compatibility verification,
+  plus next_actions for uncertainty, rejection, failed checks and pending visibility.
 - expected errors: error.code, error.message and, where relevant, error.uncertain.
   Argument errors also produce JSON when --json is present.
 
 Each next_actions entry has code, kind, instructions, documentation and, when
-relevant, platform. Common kinds: build, configure, review_copy, credentials,
-browser, reconcile, resolve_conflict and retry_read. Instructions use subcommands;
+relevant, platform, operation key, project_id, file_id and url. Common kinds: build,
+configure, review_copy, credentials, browser, reconcile, resolve_conflict, retry_read
+and verify. A verify action checks an acknowledged upload later; it does not request
+another upload. Instructions use subcommands;
 prepend your ModCourier entry point and append --project as usual.
 
 The journal records operations separately for each platform/release. A process

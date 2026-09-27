@@ -3,9 +3,9 @@ import re
 
 from .connectors import REGISTRY
 from .errors import CourierError
-from .guidance import next_action
+from .guidance import next_actions, BROWSER_CODES
 from .inspect import local_issues
-from .models import ATTENTION_STATUSES, REJECTED_STATUSES, RemoteFile, Step, check_remote_file, same_file
+from .models import ACCEPTED_STATUSES, RemoteFile, Step, check_remote_file, check_variant, same_file, variant_matches
 from .publication import reviewed_publication
 
 
@@ -22,15 +22,8 @@ class Plan:
             "ready": not any(s.action in {"blocked", "needs_browser"} for s in self.steps),
             "steps": [s.as_dict() for s in self.steps],
             "publication_language": "en",
-            "next_actions": [next_action(s.details.get("code", "browser_required"), s.reason, s.platform)
-                             for s in self.steps if s.action in {"blocked", "needs_browser"}],
+            "next_actions": next_actions([s.as_dict() for s in self.steps]),
         }
-
-
-def variant_matches(artifact, remote, *, allow_unknown=False):
-    return ((allow_unknown and not remote.loaders) or set(remote.loaders) == set(artifact.loaders)) and (
-        (allow_unknown and not remote.game_versions) or set(remote.game_versions) == set(artifact.game_versions)
-    )
 
 
 def choose_release(artifact, files):
@@ -39,7 +32,7 @@ def choose_release(artifact, files):
         matching = [f for f in identical if variant_matches(artifact, f)]
         if not matching:
             raise CourierError("metadata_conflict", f"{artifact.path.name} exists with different or missing loader/Minecraft tags.")
-        remote = next((f for f in matching if f.status not in REJECTED_STATUSES | ATTENTION_STATUSES), matching[0])
+        remote = next((f for f in matching if f.status in ACCEPTED_STATUSES), matching[0])
         check_remote_file(remote)
         return remote
     for remote in files:
@@ -50,6 +43,31 @@ def choose_release(artifact, files):
             if variant_matches(artifact, remote, allow_unknown=True):
                 raise CourierError("version_conflict", f"{artifact.key} already exists with different or unverifiable content (file {remote.id}).")
     return None
+
+
+def plan_release(name, artifact, project, files, state):
+    key = f"{name}:{artifact.key}"
+    previous = state.operation(key)
+    project_id = project.id if project else ""
+    if previous.get("project_id") and project and str(previous["project_id"]) != project.id:
+        raise CourierError("binding_conflict", f"Journal entry {key} belongs to another remote project.")
+    matched = choose_release(artifact, files)
+    if matched:
+        return Step(name, "skip", "The platform already has this file.", project_id, artifact, matched)
+    if (previous.get("status") in {"started", "uncertain", "accepted"}
+        and previous.get("sha256") and previous["sha256"] != artifact.hashes["sha256"]):
+        raise CourierError("version_conflict", f"{artifact.key} changed since a previous upload attempt. Resolve that release first.")
+    if previous.get("status") == "accepted" and previous.get("receipt"):
+        receipt = RemoteFile(**previous["receipt"])
+        if not same_file(artifact, receipt):
+            raise CourierError("verification_failed", f"The saved receipt for {key} does not match the artifact.", uncertain=True)
+        check_variant(artifact, receipt)
+        check_remote_file(receipt)
+        return Step(name, "skip", "Upload was acknowledged; public visibility is not yet verified.",
+                    project_id, artifact, receipt)
+    if previous.get("status") in {"started", "uncertain"}:
+        raise CourierError("uncertain_upload", f"{key} may have been accepted before the connection failed. Check the author dashboard; see docs/recovery.md.")
+    return Step(name, "upload", "This release file is not present.", project_id, artifact)
 
 
 def build_plan(config, items, state, selected=None, connectors=None):
@@ -71,8 +89,7 @@ def build_plan(config, items, state, selected=None, connectors=None):
                 connector.settings = {**connector.settings, "project_id": journal_bound}
             project = connector.discover()
             plan.projects[name] = project
-            if project and project.status in {"rejected", "withheld", "archived", "deleted", "changes_required",
-                                              "inactive", "abandoned", "unknown"}:
+            if project and project.status not in {"draft", "approved", "unlisted", "published", "processing", "pending_moderation"}:
                 raise CourierError("project_rejected", f"The project is {project.status}; inspect its moderation messages.")
             create_record = state.operation(name + ":create")
             if project is None and create_record.get("status") in {"started", "uncertain", "accepted"}:
@@ -81,36 +98,15 @@ def build_plan(config, items, state, selected=None, connectors=None):
                 raise CourierError("browser_required", "Create or locate the project in the author dashboard, then bind its ID.")
             page_action = connector.page_action(project) if project else None
             files = connector.files(project) if project else []
-            actions = []
-            for artifact in items:
-                key = f"{name}:{artifact.key}"
-                previous = state.operation(key)
-                if previous and previous.get("project_id") and project and str(previous["project_id"]) != project.id:
-                    raise CourierError("binding_conflict", f"Journal entry {key} belongs to another remote project.")
-                matched = choose_release(artifact, files)
-                if matched:
-                    actions.append(Step(name, "skip", "The platform already has this file.", project.id, artifact, matched))
-                    continue
-                if previous.get("status") in {"started", "uncertain", "accepted"} and previous.get("sha256") and previous["sha256"] != artifact.hashes["sha256"]:
-                    raise CourierError("version_conflict", f"{artifact.key} changed since a previous upload attempt. Resolve that release first.")
-                if previous.get("status") == "accepted" and previous.get("receipt"):
-                    receipt = RemoteFile(**previous["receipt"])
-                    if not same_file(artifact, receipt):
-                        raise CourierError("verification_failed", f"The saved receipt for {key} does not match the artifact.", uncertain=True)
-                    check_remote_file(receipt)
-                    actions.append(Step(name, "skip", "Upload was acknowledged; public visibility is not yet verified.",
-                                        project.id if project else "", artifact, receipt))
-                    continue
-                if previous.get("status") in {"started", "uncertain"}:
-                    raise CourierError("uncertain_upload", f"{key} may have been accepted before the connection failed. Check the author dashboard; see docs/recovery.md.")
-                actions.append(Step(name, "upload", "This release file is not present.",
-                                    project.id if project else "", artifact))
+            actions = [plan_release(name, artifact, project, files, state) for artifact in items]
             uploads = [s.artifact for s in actions if s.action == "upload"]
+            if uploads or connector.needs_submission(project) or page_action:
+                connector.validate_project(new=project is None)
             if uploads:
-                connector.validate(uploads, new=project is None)
-            elif project and (connector.needs_submission(project) or page_action):
-                # Submission still needs policy checks when every file was uploaded earlier.
-                connector.validate(items, new=False)
+                prepared = connector.prepare_uploads(uploads)
+                for step in actions:
+                    if step.action == "upload":
+                        step.upload_data = prepared[step.artifact.key]
             if project is None:
                 plan.steps.append(Step(name, "create", "Create a new draft project."))
             elif page_action:
@@ -123,7 +119,7 @@ def build_plan(config, items, state, selected=None, connectors=None):
                                        project.id if project else ""))
         except CourierError as exc:
             plan.steps.append(Step(
-                name, "needs_browser" if exc.code == "browser_required" else "blocked",
+                name, "needs_browser" if exc.code in BROWSER_CODES else "blocked",
                 str(exc), details={"code": exc.code},
             ))
     return plan

@@ -1,5 +1,4 @@
 import argparse
-from dataclasses import asdict
 import json
 import os
 from pathlib import Path
@@ -13,9 +12,9 @@ from .errors import CourierError
 from .guidance import next_action
 from .handoff import prepare
 from .inspect import artifacts, local_issues, suggested_config
-from .models import RemoteFile, RESERVED_RELEASE_IDS, check_remote_file
-from .planner import build_plan, variant_matches
+from .planner import build_plan
 from .publication import Publication
+from .recovery import recover, status
 from .runner import execute
 from .state import State, atomic_json
 
@@ -113,76 +112,6 @@ def ensure_ignore(root):
     text = path.read_text(encoding="utf-8-sig") if path.exists() else ""
     if ".modcourier/" not in text.splitlines():
         path.write_text(text.rstrip("\n") + "\n.modcourier/\n", encoding="utf-8")
-
-
-def status(config, state):
-    results = []
-    actions = []
-    connectors, projects = {}, {}
-    for key, operation in state.data["operations"].items():
-        if not operation.get("receipt"):
-            if operation.get("status") in {"started", "uncertain", "failed"}:
-                results.append({"platform": key.split(":")[0], "key": key,
-                                "status": operation["status"], "message": "Inspect the journal and author dashboard."})
-            continue
-        name = key.split(":")[0]
-        receipt = RemoteFile(**operation["receipt"])
-        message = "Last acknowledged upload; current public status could not be verified."
-        fresh = None
-        error = None
-        try:
-            if name not in connectors:
-                connectors[name] = REGISTRY[name](config)
-            connector = connectors[name]
-            project_key = (name, operation["project_id"])
-            if project_key not in projects:
-                projects[project_key] = connector.get_project(operation["project_id"])
-            project = projects[project_key]
-            fresh = connector.find_file(project, receipt.id, receipt) if project else None
-            if fresh:
-                receipt = fresh
-                message = "Verified against the platform."
-        except CourierError as exc:
-            message = str(exc)
-            error = exc
-        fallback = operation["status"] if operation["status"] in {"started", "uncertain", "failed"} else "accepted_unverified"
-        if error and error.code == "verification_failed":
-            fallback = "uncertain"
-            actions.append(next_action(error.code, str(error), name))
-        results.append({"platform": name, "key": key, "status": receipt.status if fresh else fallback,
-                        "last_known_status": operation["receipt"]["status"],
-                        "journal_status": operation["status"],
-                        "url": receipt.url, "message": message, "verified_now": fresh is not None})
-    return {"schema_version": 1, "results": results, "next_actions": actions,
-            "message": "No recorded uploads." if not results else "Recorded release status."}
-
-
-def recover(config, state, args):
-    key = args.platform + ":" + args.release_id
-    previous = state.operation(key)
-    if args.release_id in RESERVED_RELEASE_IDS or not previous.get("sha256") or not previous.get("project_id"):
-        raise CourierError("not_upload", "Recovery applies only to file uploads. For uncertain project creation, locate the draft and bind its ID.")
-    if previous.get("status") not in {"started", "uncertain"}:
-        raise CourierError("not_uncertain", "Only an uncertain upload can be recovered.")
-    if args.absent:
-        state.record(key, status="failed", receipt=None, recovery={"absent": True, "evidence": args.evidence})
-        return {"message": "Absence recorded. The next publish may attempt this upload again."}
-    items = artifacts(config)
-    artifact = next((a for a in items if a.key == args.release_id), None)
-    if not artifact or artifact.hashes["sha256"] != previous.get("sha256"):
-        raise CourierError("artifact_changed", "Recovery requires the exact original artifact.")
-    connector = REGISTRY[args.platform](config)
-    project = connector.get_project(previous["project_id"])
-    if not project:
-        raise CourierError("project_inaccessible", "The project is not visible to the API. Keep the journal and verify in the dashboard.")
-    remote = connector.find_file(project, args.file_id, artifact)
-    if not remote:
-        raise CourierError("verification_failed", "Remote file does not match the original artifact hash.")
-    if not variant_matches(artifact, remote):
-        raise CourierError("metadata_conflict", "Remote file has different or missing loader/Minecraft tags.")
-    check_remote_file(remote)
-    state.record(key, status="accepted", receipt=asdict(remote), recovery={"evidence": args.evidence})
-    return {"message": "Recovered the acknowledged file; a repeated publish will not duplicate it."}
 
 
 def dispatch(args):

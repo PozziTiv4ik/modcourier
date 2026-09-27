@@ -1,6 +1,44 @@
 """One set of next steps for CLI errors, plans and saved handoffs."""
+from .models import ATTENTION_STATUSES, REJECTED_STATUSES
 
 DOCS = "https://github.com/PozziTiv4ik/modcourier/blob/main/docs/"
+BROWSER_CODES = {"browser_required", "page_review_required", "catalog_unavailable", "disclosures_required", "remote_attention"}
+BLOCKING_STATUSES = {"blocked", "needs_browser", "failed", "uncertain", "started"}
+WAITING_STATUSES = {"uploaded", "accepted_unverified", "pending_moderation", "processing", "scheduled", "early_access"}
+
+
+def result_action(result):
+    """The same result produces the same guidance in plans, reports and handoffs."""
+    status = result.get("status", result.get("action"))
+    code = result.get("code") or result.get("details", {}).get("code")
+    message = result.get("message") or result.get("reason", "")
+    if status in {"started", "uncertain"}:
+        action = result.get("action") or result.get("key", "").partition(":")[2]
+        if action == "create":
+            code = "uncertain_creation"
+        elif action in {"update_page", "verify_page"}:
+            code = "page_unverified"
+        elif action == "submit":
+            code = "submission_unverified"
+        else:
+            code = code if code == "verification_failed" else "uncertain_upload"
+    elif status in REJECTED_STATUSES and status != "failed":
+        code = "remote_rejected"
+        message = message or f"The remote file is {status}."
+    elif status in ATTENTION_STATUSES:
+        code = "remote_attention"
+        message = message or f"The remote file is {status}."
+    elif status in WAITING_STATUSES:
+        code = code or "verification_pending"
+        message = message or f"The upload is {status}; public availability is not yet confirmed."
+    elif status not in BLOCKING_STATUSES and not code:
+        return None
+    action = next_action(code or "local_error", message, result.get("platform"))
+    return {**action, **{key: result[key] for key in ("key", "project_id", "file_id", "url") if result.get(key)}}
+
+
+def next_actions(results):
+    return [action for result in results if (action := result_action(result)) is not None]
 
 
 def next_action(code, message, platform=None):
@@ -39,6 +77,35 @@ def next_action(code, message, platform=None):
     elif code in {"policy_blocked", "policy_input"}:
         kind, page = "policy", "setup.md"
         instructions = [message, "Check the platform rules and record AI usage truthfully; do not change disclosures to bypass a restriction."]
+    elif code == "page_review_required":
+        kind, page = "browser", "publication-language.md"
+        instructions = [message,
+                        "Update the bound project's title, summary and description using the reviewed English copy; preserve its useful content.",
+                        "Verify the rendered page, then run bind curseforge PROJECT_ID --page-confirmed and inspect --json."]
+    elif code == "disclosures_required":
+        kind, page = "browser", "setup.md"
+        instructions = [message,
+                        "Apply the required AI disclosures in the project's settings, then bind modrinth PROJECT_ID --disclosures-confirmed.",
+                        "If this is the first release, check existing drafts before creating a draft in the author website.",
+                        "Run inspect --json again."]
+    elif code == "catalog_unavailable":
+        kind, page = "browser", "setup.md"
+        instructions = [message,
+                        "Configure CURSEFORGE_API_KEY (or the configured api_key_env) locally to enable API inspection.",
+                        "For the browser route, check the bound project's Files tab, including pending files; upload only missing releases using the reviewed English fields.",
+                        "Retain file URLs and moderation status. An unavailable catalog never proves absence."]
+    elif code == "remote_attention":
+        kind, page = "browser", "recovery.md"
+        instructions = [message, "Inspect this file's status and moderation messages in the existing project's author dashboard.",
+                        "Resolve the file or draft before running inspect --json again. Keep the journal and do not upload another copy."]
+    elif code in {"page_unverified", "submission_unverified"}:
+        kind, page = "retry_read", "recovery.md"
+        instructions = [message, "Keep the journal and run inspect --json to reconcile the project's current page or submission status.",
+                        "If it remains unresolved, inspect the existing project in the author dashboard."]
+    elif code == "verification_pending":
+        kind, page = "verify", "recovery.md"
+        instructions = [message, "Run status --json later to check this acknowledged upload; do not upload it again.",
+                        "If it remains unavailable, check the existing file and moderation messages in the author dashboard."]
     elif code in {"browser_required", "ambiguous_project", "slug_taken"}:
         kind, page = "browser", "setup.md"
         instructions = [

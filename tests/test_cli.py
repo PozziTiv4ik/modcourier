@@ -11,6 +11,7 @@ from unittest.mock import patch
 from tests.helpers import config, connectors, jar, review_copy, service
 from modcourier.config import Config
 from modcourier.cli import main
+from modcourier import __version__
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -69,7 +70,7 @@ class CliTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(ROOT / "modcourier.py"), "--version"],
                                 cwd=self.root, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("1.0.0", result.stdout)
+        self.assertIn(__version__, result.stdout)
 
     def test_options_before_subcommand(self):
         output = io.StringIO()

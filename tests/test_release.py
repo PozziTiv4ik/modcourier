@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from tests.helpers import jar
+from modcourier import __version__
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,7 +26,7 @@ class ReleaseTests(unittest.TestCase):
             result = subprocess.run([sys.executable, str(target), "--version"], cwd=directory,
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("ModCourier 1.0.0", result.stdout)
+            self.assertIn("ModCourier " + __version__, result.stdout)
             jar(Path(directory))
             env = {**os.environ, "PYTHONPATH": ""}
             initialized = subprocess.run([sys.executable, str(target), "init", "--json"], cwd=directory,

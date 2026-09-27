@@ -1,6 +1,7 @@
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import hashlib
+import re
 
 from .errors import CourierError
 
@@ -8,13 +9,25 @@ from .errors import CourierError
 RESERVED_RELEASE_IDS = {"create", "submit", "update_page", "verify_page", "blocked", "needs_browser"}
 REJECTED_STATUSES = {"rejected", "deleted", "archived", "failed", "malware_detected", "withheld"}
 ATTENTION_STATUSES = {"draft", "testing", "unknown", "changes_required", "unavailable", "deprecated", "inactive", "abandoned"}
+ACCEPTED_STATUSES = {"published", "uploaded", "accepted_unverified", "pending_moderation", "processing", "scheduled", "early_access"}
 
 
 def check_remote_file(remote):
     if remote.status in REJECTED_STATUSES:
         raise CourierError("remote_rejected", f"Remote file {remote.id} is {remote.status}; resolve it in the author dashboard.")
-    if remote.status in ATTENTION_STATUSES:
-        raise CourierError("browser_required", f"Remote file {remote.id} is {remote.status}; check it in the author dashboard.")
+    if remote.status not in ACCEPTED_STATUSES:
+        raise CourierError("remote_attention", f"Remote file {remote.id} is {remote.status}; check it in the author dashboard.")
+
+
+def variant_matches(expected, remote, *, allow_unknown=False):
+    return ((allow_unknown and not remote.loaders) or set(remote.loaders) == set(expected.loaders)) and (
+        (allow_unknown and not remote.game_versions) or set(remote.game_versions) == set(expected.game_versions)
+    )
+
+
+def check_variant(expected, remote):
+    if not variant_matches(expected, remote):
+        raise CourierError("metadata_conflict", f"Remote file {remote.id} has different or missing loader/Minecraft tags.")
 
 
 @dataclass
@@ -75,6 +88,10 @@ class RemoteFile:
             or any(not isinstance(values, list) or not all(isinstance(v, str) for v in values)
                    for values in (self.loaders, self.game_versions))):
             raise CourierError("invalid_response", "Invalid remote file identity, hashes or compatibility tags.")
+        lengths = {"sha512": 128, "sha256": 64, "sha1": 40, "md5": 32}
+        if any(name in lengths and not re.fullmatch(r"[a-fA-F0-9]{%d}" % lengths[name], value)
+               for name, value in self.hashes.items()):
+            raise CourierError("invalid_response", "The platform returned a malformed file hash.")
 
 
 @dataclass
@@ -103,6 +120,9 @@ class Step:
     artifact: Artifact | None = None
     remote: RemoteFile | None = None
     details: dict = field(default_factory=dict)
+    # Prepared by the connector; shared code only carries it to upload().
+    # Wire payloads are deliberately excluded from the public plan and journal.
+    upload_data: dict | None = field(default=None, repr=False)
 
     @property
     def key(self):

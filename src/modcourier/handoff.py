@@ -1,7 +1,7 @@
 """Portable browser tasks: the agent uses its own browser, not private APIs."""
 from .state import atomic_json
 from .publication import Publication
-from .guidance import next_action
+from .guidance import BLOCKING_STATUSES, next_action, result_action
 
 
 def prepare(config, items, plan, directory, report=None):
@@ -9,19 +9,18 @@ def prepare(config, items, plan, directory, report=None):
     publication = Publication.read(config)
     preview = publication.preview(config)
     entries = report["results"] if report is not None else [
-        {"platform": step.platform, "status": step.action, "message": step.reason, **step.details}
+        {"platform": step.platform, "status": step.action, "action": step.action, "key": step.key,
+         "message": step.reason, **step.details}
         for step in plan.steps
     ]
     for entry in entries:
-        if entry["status"] not in {"blocked", "needs_browser", "failed", "uncertain"}:
+        if entry["status"] not in BLOCKING_STATUSES:
             continue
-        code = entry.get("code", "browser_required")
-        if entry["status"] == "uncertain" and entry.get("action") in {"create", "upload"}:
-            code = "uncertain_creation" if entry["action"] == "create" else "uncertain_upload"
+        action = result_action(entry)
         if not preview["reviewed"]:
             code = preview.get("issue", {}).get("code", "publication_review_required")
-        tasks.append({**next_action(code, entry.get("message", ""), entry["platform"]),
-                      "reason": entry.get("message", "")})
+            action = {**action, **next_action(code, entry.get("message", ""), entry["platform"])}
+        tasks.append({**action, "reason": entry.get("message", "")})
     if not tasks:
         for name in ("handoff.json", "handoff.md"):
             (directory / name).unlink(missing_ok=True)

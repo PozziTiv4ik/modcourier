@@ -30,6 +30,30 @@ page updates and submission requirements. Direct file lookups and platform
 response parsing remain inside the connector. No third-party runtime dependency,
 translation service, server or model provider was added.
 
+The follow-up refactor replaces stateful validate/upload coupling with
+validate_project, prepare_uploads and upload(project, artifact, upload_data).
+Prepared payloads belong to the plan; another inspection cannot replace them.
+The CLI delegates status and recovery to a separate module. All paths share the
+same hash and compatibility check, and result guidance has one implementation.
+
+## Follow-up findings in 1.1.0
+
+| Scenario | Previous risk | Corrected behavior |
+|---|---|---|
+| Another plan reused a connector | Pending metadata silently replaced or read from later config | Each plan carries its prepared upload data |
+| Page/submission resume | Unrelated version catalogs and dependencies could block it | Project/policy checks are separate from upload preparation |
+| Matching resource pack during automatic discovery | Bound-project type check was bypassed | Discovered projects must also be Java mods |
+| Empty object as a file list or incomplete author record | Malformed data could imply no existing release/project | Validate record lists and required identity fields |
+| Foreign project in a version listing | Shared code could consider unrelated files | Check project ID on listings and upload acknowledgements too |
+| Empty Modrinth draft version | Its occupied release identity disappeared from planning | Resolve the draft before another upload |
+| CurseForge changes during pagination | Repeated/omitted files could hide an existing release | Require stable totals and unique IDs |
+| Invalid identity/hash or an unknown status | Broken remote data could become a receipt or success | Validate identities/hashes and require a recognized usable status |
+| Status after compatibility changes | Matching bytes could still be reported as published | Compare saved loader/Minecraft tags as well |
+| Rejected acknowledgement followed by failed read | Acceptance could mask rejection | Keep the receipt and report the rejection |
+| Project rejected during submission | File acceptance could leave the overall report complete | Report the project failure and preserve successful file receipts |
+| Status and browser guidance | Missing actions or unrelated project-creation advice | Specific action codes with operation/file context |
+| Corrupt operation state or binding | Journal entries could reach execution unchecked | Report invalid_state before use |
+
 ## Verification and limits
 
 The scenario suite uses the real CLI and HTTP transport against local fixture
@@ -37,9 +61,14 @@ servers. It covers accepted uploads, uncertain writes, repeat runs, partial
 completion, the audit cases above and portable application execution outside the
 checkout.
 
-Live read-only checks performed: Modrinth's game-version, loader, category and
+The 1.1.0 local run passed 122 unittest scenarios on Windows with Python 3.13.13.
+The portable archive was built and executed from a temporary directory outside
+the checkout, with PYTHONPATH cleared and user site packages disabled.
+
+Live read-only checks performed for 1.1.0: Modrinth's game-version, loader, category and
 license catalogs, plus the public Fabric API project and a direct version lookup
-to verify project identity, file shape, status and SHA-512 availability.
+through the actual connector to verify project identity, file shape, status and
+SHA-512 availability. These checks are reproducible with scripts/smoke_api.py.
 
 Authenticated production uploads and signed-in browser actions were not exercised
 by this audit. Moderation and private-project access still depend on the author's

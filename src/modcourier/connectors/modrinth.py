@@ -1,11 +1,11 @@
 import os
 import re
 
-from .base import Connector, api_operation, segment
+from .base import Connector, api_operation, identifier, records, segment
 from ..config import local_path, repo_url
 from ..errors import CourierError
 from ..http import Http
-from ..models import RemoteFile, RemoteProject, file_hashes
+from ..models import RemoteFile, RemoteProject, file_hashes, same_file
 
 
 class Modrinth(Connector):
@@ -17,20 +17,23 @@ class Modrinth(Connector):
         super().__init__(config)
         self.token = os.environ.get(self.settings.get("token_env", "MODRINTH_TOKEN"), "")
         self.http = http or Http("https://api.modrinth.com/v2", {"Authorization": self.token} if self.token else {})
-        self.dependencies = {}
         self.user = None
 
     def authenticated(self):
         if not self.token:
             raise CourierError("missing_token", "Set MODRINTH_TOKEN (or configured token_env) in the local environment.")
         if self.user is None:
-            self.user = self.http.get("/user")
+            user = self.http.get("/user")
+            identifier(user["id"])
+            self.user = user
         return self.user
 
     @staticmethod
     def project(data):
+        if data["project_type"] != "mod":
+            raise CourierError("wrong_project_type", "The Modrinth project must be a Minecraft Java mod.")
         return RemoteProject(
-            str(data["id"]), data["slug"], data["title"], data["status"],
+            identifier(data["id"]), data["slug"], data["title"], data["status"],
             "https://modrinth.com/mod/" + data["slug"], data.get("source_url") or "", data,
         )
 
@@ -42,28 +45,27 @@ class Modrinth(Connector):
         project = self.project(data)
         if str(project_id) not in {project.id, project.slug}:
             raise CourierError("invalid_response", "Modrinth returned a different project ID or slug.")
-        if data["project_type"] != "mod":
-            raise CourierError("wrong_project_type", "The bound Modrinth project must be a Minecraft Java mod.")
         return project
 
     @api_operation()
     def discover(self):
         user = self.authenticated()
         project_id = self.settings.get("project_id")
-        owned = self.http.get("/user/" + segment(user["id"]) + "/projects")
-        if not isinstance(owned, list):
-            raise CourierError("invalid_response", "Modrinth returned an invalid project list.")
+        owned = records(self.http.get("/user/" + segment(user["id"]) + "/projects"))
+        for entry in owned:
+            identifier(entry["id"])
+            if any(not isinstance(entry.get(field), str) or not entry[field]
+                   for field in ("slug", "title", "status", "project_type")):
+                raise CourierError("invalid_response", "Modrinth returned incomplete author project data.")
         if project_id:
             project = self.get_project(project_id)
             if project is None:
                 raise CourierError("project_inaccessible", "Bound Modrinth project is missing or inaccessible; do not recreate it.")
-            source = repo_url(self.config.project.get("source_url", ""))
-            if source and project.source_url and repo_url(project.source_url) != source:
-                raise CourierError("source_mismatch", "The bound Modrinth project points to a different source repository.")
+            self.check_source(project)
             # Explicit binding supports organization/team projects too; the API enforces write scopes.
-            if not any(str(p["id"]) == project.id for p in owned):
-                members = self.http.get("/project/" + segment(project.id) + "/members")
-                if not any(str(m.get("user", {}).get("id")) == str(user["id"]) and m.get("accepted", False) for m in members):
+            if not any(identifier(p["id"]) == project.id for p in owned):
+                members = records(self.http.get("/project/" + segment(project.id) + "/members"))
+                if not any(identifier(m["user"]["id"]) == user["id"] and m.get("accepted") is True for m in members):
                     raise CourierError("ownership", "The Modrinth token user is not an accepted member of the bound project.")
             return project
         source = repo_url(self.config.project.get("source_url", ""))
@@ -93,17 +95,25 @@ class Modrinth(Connector):
         version = self.http.get("/version/" + segment(file_id), missing_ok=True)
         if version is None:
             return []
-        if str(version["project_id"]) != project.id or str(version["id"]) != str(file_id):
+        if identifier(version["id"]) != str(file_id):
             raise CourierError("verification_failed", "Modrinth returned a version from another project or ID.", uncertain=True)
         return self.remote_files([version], project)
 
     @staticmethod
     def remote_files(versions, project):
-        if not isinstance(versions, list):
-            raise CourierError("invalid_response", "Modrinth returned an invalid version list.")
         result = []
-        for version in versions:
-            for file in version["files"]:
+        seen = set()
+        for version in records(versions):
+            version_id = identifier(version["id"])
+            if identifier(version["project_id"]) != project.id:
+                raise CourierError("verification_failed", "Modrinth returned a version from another project.", uncertain=True)
+            if version_id in seen:
+                raise CourierError("listing_incomplete", "Modrinth repeated a version in its listing; inspect again.")
+            seen.add(version_id)
+            files = records(version["files"])
+            if not files:
+                raise CourierError("remote_attention", f"Modrinth version {version_id} has no files. Resolve the empty draft in the author dashboard.")
+            for file in files:
                 status = version.get("status", "unknown")
                 if status in {"listed", "unlisted"}:
                     if project.status == "draft":
@@ -113,14 +123,14 @@ class Modrinth(Connector):
                     else:
                         status = "pending_moderation" if project.status == "processing" else project.status
                 result.append(RemoteFile(
-                    str(version["id"]), version["version_number"], file["filename"], file["hashes"],
+                    version_id, version["version_number"], file["filename"], file["hashes"],
                     status, f"{project.url}/version/{version['id']}",
                     version.get("loaders", []), version.get("game_versions", []),
                 ))
         return result
 
     @api_operation()
-    def validate(self, artifacts, *, new=False):
+    def validate_project(self, *, new=False):
         self.publication()
         self.authenticated()
         policy = self.config.raw.get("policy", {}).get("ai_usage", "unknown")
@@ -129,21 +139,7 @@ class Modrinth(Connector):
         if policy not in {"none", "assisted", "substantial"}:
             raise CourierError("policy_input", "Set policy.ai_usage truthfully: none, assisted, substantial or primary.")
         if policy == "substantial" and not self.settings.get("disclosures_confirmed"):
-            raise CourierError("browser_required", "Apply the required Modrinth AI disclosures in the project settings, then confirm them with bind --disclosures-confirmed.")
-        known_versions = {v["version"] for v in self.http.get("/tag/game_version")}
-        known_loaders = {v["name"] for v in self.http.get("/tag/loader")}
-        for artifact in artifacts:
-            if set(artifact.game_versions) - known_versions:
-                raise CourierError("unsupported_version", f"Modrinth does not recognize {artifact.game_versions}.")
-            if set(artifact.loaders) - known_loaders:
-                raise CourierError("unsupported_loader", f"Modrinth does not recognize {artifact.loaders}.")
-            dependencies = []
-            for target, kind in self.dependency_specs(artifact):
-                project = self.get_project(target)
-                if not project:
-                    raise CourierError("missing_dependency", f"Modrinth dependency {target} is missing or inaccessible.")
-                dependencies.append({"project_id": project.id, "dependency_type": kind})
-            self.dependencies[artifact.key] = dependencies
+            raise CourierError("disclosures_required", "Apply the required Modrinth AI disclosures in the project settings, then confirm them with bind --disclosures-confirmed.")
         if new:
             values = self.config.project
             for key in ("title", "summary", "slug", "license"):
@@ -155,19 +151,47 @@ class Modrinth(Connector):
                 raise CourierError("project_metadata", "project.summary exceeds 256 characters.")
             if not self.config.text("project", "body").strip():
                 raise CourierError("project_metadata", "Provide project.body or project.body_file.")
-            licenses = {entry["short"] for entry in self.http.get("/tag/license")} | {"ARR", "LicenseRef-Custom"}
+            licenses = {entry["short"] for entry in records(self.http.get("/tag/license"))} | {"ARR", "LicenseRef-Custom"}
             if values["license"] not in licenses:
                 raise CourierError("project_metadata", "Choose a valid SPDX license, ARR, or LicenseRef-Custom with license_url.")
             if values["license"] == "LicenseRef-Custom" and not values.get("license_url"):
                 raise CourierError("project_metadata", "A custom license requires project.license_url.")
             categories = self.settings.get("categories", [])
-            known = {entry["name"] for entry in self.http.get("/tag/category") if entry.get("project_type") == "mod"}
+            known = {entry["name"] for entry in records(self.http.get("/tag/category")) if entry.get("project_type") == "mod"}
             if not categories or not set(categories).issubset(known) or len(categories) > 3:
                 raise CourierError("project_metadata", "Choose 1-3 valid modrinth.categories from /tag/category.")
             if values.get("icon"):
                 icon = local_path(self.config.root, values["icon"])
                 if not icon.is_file():
                     raise CourierError("project_metadata", "project.icon file is missing.")
+
+    @api_operation()
+    def prepare_uploads(self, artifacts):
+        publication = self.publication()
+        known_versions = {v["version"] for v in records(self.http.get("/tag/game_version"))}
+        known_loaders = {v["name"] for v in records(self.http.get("/tag/loader"))}
+        prepared, resolved = {}, {}
+        for artifact in artifacts:
+            if set(artifact.game_versions) - known_versions:
+                raise CourierError("unsupported_version", f"Modrinth does not recognize {artifact.game_versions}.")
+            if set(artifact.loaders) - known_loaders:
+                raise CourierError("unsupported_loader", f"Modrinth does not recognize {artifact.loaders}.")
+            dependencies = []
+            for target, kind in self.dependency_specs(artifact):
+                if target not in resolved:
+                    resolved[target] = self.get_project(target)
+                project = resolved[target]
+                if not project:
+                    raise CourierError("missing_dependency", f"Modrinth dependency {target} is missing or inaccessible.")
+                dependencies.append({"project_id": project.id, "dependency_type": kind})
+            prepared[artifact.key] = {
+                "name": publication.release_name(artifact), "version_number": artifact.key,
+                "changelog": publication.changelog, "dependencies": dependencies,
+                "game_versions": list(artifact.game_versions), "loaders": list(artifact.loaders),
+                "version_type": self.config.release.get("type", "release"), "environment": artifact.environment,
+                "featured": True, "file_parts": ["file"], "primary_file": "file",
+            }
+        return prepared
 
     @api_operation(write=True)
     def create_project(self, artifacts):
@@ -193,26 +217,14 @@ class Modrinth(Connector):
         return self.project(response)
 
     @api_operation(write=True)
-    def upload(self, project, artifact):
-        publication = self.publication()
-        data = {
-            "project_id": project.id, "name": publication.release_name(artifact), "version_number": artifact.key,
-            "changelog": publication.changelog,
-            "dependencies": self.dependencies[artifact.key], "game_versions": artifact.game_versions,
-            "version_type": self.config.release.get("type", "release"), "loaders": artifact.loaders,
-            "featured": True, "file_parts": ["file"], "primary_file": "file",
-            "environment": artifact.environment,
-        }
+    def upload(self, project, artifact, upload_data):
+        self.publication()
+        data = {**upload_data, "project_id": project.id}
         response = self.http.multipart("/version", {"data": data}, [("file", artifact.path, artifact.hashes["sha256"])])
-        if not isinstance(response, dict) or not response.get("id"):
-            raise CourierError("invalid_response", "Modrinth did not return a version ID.", uncertain=True)
-        matching = [f for f in response.get("files", []) if f.get("hashes", {}).get("sha512") == artifact.hashes["sha512"]]
+        matching = [file for file in self.remote_files([response], project) if same_file(artifact, file)]
         if not matching:
             raise CourierError("verification_failed", "Modrinth response did not contain the expected file hash.", uncertain=True)
-        return RemoteFile(
-            str(response["id"]), response["version_number"], artifact.path.name, matching[0]["hashes"],
-            "uploaded", f"{project.url}/version/{response['id']}", artifact.loaders, artifact.game_versions,
-        )
+        return matching[0]
 
     def needs_submission(self, project):
         return project is None or project.status == "draft"
@@ -231,11 +243,13 @@ class Modrinth(Connector):
             return "pending_moderation"
         return current.status
 
+    @api_operation()
     def page_action(self, project):
         publication = self.publication()
         expected = {"title": publication.title, "description": publication.summary, "body": publication.body}
         return "update_page" if any(project.raw.get(key) != value for key, value in expected.items()) else None
 
+    @api_operation(write=True)
     def update_page(self, project):
         publication = self.publication()
         self.http.json("PATCH", "/project/" + segment(project.id), {

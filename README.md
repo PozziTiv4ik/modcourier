@@ -46,7 +46,8 @@ into claims about versions you have not tested.
 
 Requires **Python 3.11+**. Windows, Linux and macOS. **Zero third-party Python dependencies.**
 
-Use `modcourier.py` from this checkout for the current English-publication workflow.
+Use `modcourier.py` from this checkout, or download the portable
+[modcourier.pyz](https://github.com/PozziTiv4ik/modcourier/releases/latest/download/modcourier.pyz).
 No installation step:
 
 ```sh
@@ -68,9 +69,8 @@ English text files are preferred when present; imported source text is never
 automatically marked as reviewed.
 
 For a portable single-file copy, run `python scripts/build_release.py` and use
-`dist/modcourier.pyz` with the same commands. The earlier
-[v1.0.0 release](https://github.com/PozziTiv4ik/modcourier/releases/tag/v1.0.0)
-predates the English-publication checks; use this checkout/build for those checks.
+`dist/modcourier.pyz` with the same commands. Release assets include SHA256SUMS;
+use `python modcourier.pyz --version` to check the version you downloaded.
 
 Set credentials locally. They are never part of the public configuration:
 
@@ -110,6 +110,9 @@ flowchart LR
 `publish` saves its report and any remaining tasks in `.modcourier/handoff.md` /
 `handoff.json`, including failures during execution. Resolved handoffs are removed.
 Accepted, pending moderation and publicly published are distinct outcomes.
+Status checks compare compatibility tags as well as file hashes, and include the
+next action for the specific file. Page edits, disclosures and catalog access have
+separate instructions; a pending upload calls for a later status check.
 
 ## Small, extendable structure
 
@@ -123,6 +126,7 @@ src/modcourier/
   inspect.py       local discovery and validation
   planner.py       decisions without remote writes
   runner.py        execution and reconciliation
+  recovery.py      current release status and explicit upload recovery
   state.py         atomic journal and process lock
   http.py          bounded requests and streamed multipart uploads
   metadata/        Fabric / Forge / NeoForge / Quilt readers
@@ -130,6 +134,9 @@ src/modcourier/
 ```
 
 Add a platform by implementing one connector and registering it.
+Connectors return prepared upload data explicitly; the plan carries it to execution
+without relying on hidden validation caches. Page-only updates and submission-only
+resumes avoid unnecessary upload-catalog and dependency lookups.
 Add a loader through one metadata reader. See [extending](docs/extending.md).
 The [audit notes](docs/audit.md) explain the corrected failure scenarios and validation limits.
 
@@ -145,7 +152,8 @@ python scripts/smoke_api.py
 The automated suite exercises the real CLI and HTTP transport against local
 platform fixtures, including multipart uploads and failure recovery. CI tests
 Python 3.11, 3.13 and 3.14 on all three operating systems. The optional smoke script
-checks live public Modrinth catalogs without changing anything.
+checks live public Modrinth catalogs plus a project/version through the actual
+connector without changing anything.
 
 Authenticated production uploads require an author's accounts and a real mod.
 Passing fixture tests does not establish production upload success.

@@ -1,15 +1,35 @@
 from abc import ABC, abstractmethod
 from functools import wraps
 import os
+import re
 from urllib.parse import quote
 
+from ..config import repo_url
 from ..errors import CourierError
-from ..models import same_file
+from ..models import check_variant, same_file
 from ..publication import reviewed_publication
 
 
 def segment(value):
     return quote(str(value), safe="")
+
+
+def identifier(value, *, numeric=False):
+    """Validate API identities before converting them to the shared string form."""
+    if numeric:
+        valid = type(value) is int and value > 0
+    else:
+        valid = isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]+", value)
+    if not valid:
+        raise CourierError("invalid_response", "The platform returned an invalid project or file ID.")
+    return str(value)
+
+
+def records(value):
+    """Empty JSON objects/null are never evidence of an empty account or release list."""
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise CourierError("invalid_response", "The platform returned an invalid record list.")
+    return value
 
 
 def api_operation(*, write=False):
@@ -20,7 +40,7 @@ def api_operation(*, write=False):
             try:
                 return method(self, *args, **kwargs)
             except CourierError as exc:
-                if write and exc.code == "invalid_response" and not exc.uncertain:
+                if write and exc.code in {"invalid_response", "wrong_project_type", "remote_attention", "listing_incomplete"} and not exc.uncertain:
                     raise CourierError(exc.code, str(exc), uncertain=True) from exc
                 raise
             except (KeyError, TypeError, ValueError, AttributeError) as exc:
@@ -42,11 +62,21 @@ class Connector(ABC):
     def publication(self):
         return reviewed_publication(self.config)
 
+    def check_source(self, project):
+        source = repo_url(self.config.project.get("source_url", ""))
+        if source and project.source_url and repo_url(project.source_url) != source:
+            raise CourierError("source_mismatch", f"The bound {self.name} project points to a different source repository.")
+
+    def validate_project(self, *, new=False):
+        """Read-only checks for project creation, page edits or submission."""
+        self.publication()
+
     @classmethod
     def credential_status(cls, config):
+        settings = config.settings(cls.name)
         return [
-            {"platform": cls.name, "variable": config.settings(cls.name).get(setting, default),
-             "present": bool(os.environ.get(config.settings(cls.name).get(setting, default))),
+            {"platform": cls.name, "variable": settings.get(setting, default),
+             "present": bool(os.environ.get(settings.get(setting, default))),
              "purpose": purpose, "browser_fallback": fallback}
             for setting, default, purpose, fallback in cls.credentials
         ]
@@ -70,6 +100,7 @@ class Connector(ABC):
         candidates = self.files_for(project, file_id)
         match = next((file for file in candidates if same_file(expected, file)), None)
         if match:
+            check_variant(expected, match)
             return match
         if any(set(expected.hashes) & set(file.hashes) for file in candidates):
             raise CourierError("verification_failed", f"Remote file {file_id} does not match the expected hash.",
@@ -83,10 +114,12 @@ class Connector(ABC):
     def files(self, project): ...
 
     @abstractmethod
-    def validate(self, artifacts, *, new=False): ...
+    def prepare_uploads(self, artifacts):
+        """Read-only preparation; return {artifact.key: opaque upload data}."""
+        ...
 
     @abstractmethod
-    def upload(self, project, artifact): ...
+    def upload(self, project, artifact, upload_data): ...
 
     @abstractmethod
     def get_project(self, project_id): ...

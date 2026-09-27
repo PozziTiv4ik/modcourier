@@ -78,3 +78,13 @@ remote check is unavailable.
 `status` also returns journal_status so an unresolved operation remains visible.
 If a remote hash disagrees with its saved receipt, status reports uncertainty
 instead of trusting a matching weaker hash.
+If loader or Minecraft tags changed, it reports metadata_conflict even when the
+bytes still match. Rejected and unknown statuses include an action for the existing
+file. A pending or unverified upload includes a status check as the next step;
+missing catalog access is reported specifically rather than hidden behind a wait.
+
+An invalid identity, malformed list, empty Modrinth draft version, repeated page
+entry or changing CurseForge total cannot authorize another upload. Inspect again
+after the catalog stabilizes, or resolve the indicated draft in the author website.
+An acknowledgement that already reports rejection remains rejected even if the
+next lookup fails. Keep its receipt and resolve the existing file.

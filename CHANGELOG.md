@@ -1,7 +1,21 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 — 2026-09-27
 
+- Replace hidden connector validation caches with explicit prepared upload data;
+  make repeated planning independent and reuse dependency reads within a release.
+- Separate project validation from upload preparation so page/submission resumes
+  do not depend on unrelated upload catalogs.
+- Share hash and compatibility verification across publishing, status and recovery;
+  preserve rejected acknowledgements even when follow-up reads fail.
+- Report a project rejected during submission as incomplete while keeping file receipts.
+- Reject malformed identities/hashes/lists, foreign-project versions, empty draft
+  versions and unstable or repeated catalog pages before uploading.
+- Validate automatically discovered project types and unknown remote statuses.
+- Move status/recovery into a focused module and return operation-specific next
+  actions for page edits, disclosures, catalog access, rejection and pending files.
+- Validate journal operation states and project bindings before using them.
+- Expand regression scenarios and the optional read-only live connector smoke check.
 - Add a read-only local doctor command and shared next_actions for agent onboarding.
 - Simplify connector submission and file lookup contracts; remove platform API
   details from CLI recovery and platform-name branches from the planner.

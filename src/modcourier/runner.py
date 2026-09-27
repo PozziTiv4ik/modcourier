@@ -1,9 +1,8 @@
 from dataclasses import asdict, replace
 
 from .errors import CourierError
-from .guidance import next_action
+from .guidance import next_actions
 from .models import check_remote_file, file_hashes
-from .planner import variant_matches
 from .publication import reviewed_publication
 from .state import atomic_json, now
 
@@ -12,18 +11,16 @@ def verify(connector, project, artifact, receipt):
     try:
         fresh_project = connector.get_project(project.id)
         if fresh_project is None:
-            return replace(receipt, status="accepted_unverified")
+            return replace(receipt, status="accepted_unverified"), None
         remote = connector.find_file(fresh_project, receipt.id, artifact)
         if remote is not None:
-            if not variant_matches(artifact, remote):
-                raise CourierError("metadata_conflict", f"Remote file {receipt.id} has different or missing loader/Minecraft tags.")
-            return remote
+            return remote, None
     except CourierError as exc:
         if exc.code in {"verification_failed", "metadata_conflict"}:
             raise
         # A receipt is durable evidence of acceptance, not proof of publication.
-        return replace(receipt, status="accepted_unverified")
-    return replace(receipt, status="accepted_unverified")
+        return replace(receipt, status="accepted_unverified"), exc
+    return replace(receipt, status="accepted_unverified"), None
 
 
 def execute(config, items, state, plan):
@@ -79,20 +76,26 @@ def execute(config, items, state, plan):
                     raise CourierError("artifact_changed", f"{artifact.path.name} changed; inspect the release again.")
                 if step.action == "upload":
                     state.record(step.key, status="started", project_id=project.id, sha256=artifact.hashes["sha256"])
-                    receipt = connector.upload(project, artifact)
+                    receipt = connector.upload(project, artifact, step.upload_data)
                     state.record(step.key, status="accepted", receipt=asdict(receipt))
                 else:
                     receipt = step.remote
-                receipt = verify(connector, project, artifact, receipt)
+                # A failed follow-up read cannot erase rejection in the acknowledgement.
+                check_remote_file(receipt)
+                receipt, verification_error = verify(connector, project, artifact, receipt)
                 state.record(step.key, status="accepted", project_id=project.id,
                              sha256=artifact.hashes["sha256"], receipt=asdict(receipt))
                 check_remote_file(receipt)
                 results.append({**base, "status": receipt.status, "url": receipt.url,
-                                "file_id": receipt.id, "sha256": artifact.hashes["sha256"]})
+                                "project_id": project.id, "file_id": receipt.id, "sha256": artifact.hashes["sha256"],
+                                **({"code": verification_error.code, "message": str(verification_error)}
+                                   if verification_error else {})})
             elif step.action == "submit":
                 state.record(step.key, status="started", project_id=project.id)
                 status = connector.submit(project)
                 state.record(step.key, status="accepted", remote_status=status)
+                if status not in {"approved", "unlisted", "published", "pending_moderation", "processing"}:
+                    raise CourierError("project_rejected", f"The project is {status} after submission; inspect its moderation messages.")
                 results.append({**base, "status": status, "url": project.url})
         except CourierError as exc:
             # Do not replace a confirmed upload receipt with an ordinary read error.
@@ -115,15 +118,7 @@ def execute(config, items, state, plan):
         "schema_version": 1, "completed_at": now(), "complete": not failed_platforms,
         "results": results,
         "note": "Upload acceptance and pending moderation are not the same as public availability.",
-        "next_actions": [
-            next_action(
-                ("uncertain_creation" if result["action"] == "create" else "uncertain_upload")
-                if result["status"] == "uncertain" and result["action"] in {"create", "upload"}
-                else result.get("code", "local_error"),
-                result.get("message", ""), result["platform"],
-            )
-            for result in results if result["status"] in {"failed", "uncertain", "blocked", "needs_browser"}
-        ],
+        "next_actions": next_actions(results),
     }
     atomic_json(state.directory / "report.json", report)
     return report

@@ -157,7 +157,7 @@ class PublishTests(unittest.TestCase):
             clients = connectors(self.cfg, server)
             server.pages = [
                 {"id": n, "modId": 42, "isAvailable": True, "displayName": f"old-{n}", "fileName": f"old-{n}.jar", "fileStatus": 10,
-                 "gameVersions": ["1.21.1", "Fabric"], "hashes": []} for n in range(121)
+                 "gameVersions": ["1.21.1", "Fabric"], "hashes": []} for n in range(1, 122)
             ]
             cf = clients["curseforge"]
             self.assertEqual(len(cf.files(cf.get_project("42"))), 121)

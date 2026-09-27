@@ -1,7 +1,7 @@
 import os
 from urllib.parse import urlencode
 
-from .base import Connector, api_operation, segment
+from .base import Connector, api_operation, identifier, records, segment
 from ..config import repo_url
 from ..errors import CourierError
 from ..http import Http
@@ -42,19 +42,20 @@ class CurseForge(Connector):
         self.api = api or Http("https://api.curseforge.com", {"x-api-key": self.key} if self.key else {})
         self.upload_api = upload_api or Http("https://minecraft.curseforge.com/api",
                                              {"X-Api-Token": self.token} if self.token else {})
-        self.metadata = {}
 
     def require_key(self):
         if not self.key:
-            raise CourierError("browser_required",
+            raise CourierError("catalog_unavailable",
                                "CurseForge catalog lookup needs CURSEFORGE_API_KEY, separate from the upload token. "
                                "Check the author dashboard with the browser; see the generated handoff.")
 
     @staticmethod
     def project(data):
+        if data.get("gameId") != 432 or data.get("classId") != 6:
+            raise CourierError("wrong_project_type", "The CurseForge project must be a Minecraft Java mod.")
         links = data.get("links", {})
         return RemoteProject(
-            str(data["id"]), data["slug"], data["name"],
+            identifier(data["id"], numeric=True), data["slug"], data["name"],
             PROJECT_STATUSES.get(data.get("status"), "unknown"),
             links.get("websiteUrl") or "https://www.curseforge.com/minecraft/mc-mods/" + data["slug"],
             links.get("sourceUrl") or "", data,
@@ -69,25 +70,33 @@ class CurseForge(Connector):
         data = response["data"]
         if str(data["id"]) != str(project_id):
             raise CourierError("invalid_response", "CurseForge returned a different project ID.")
-        if data.get("gameId") != 432 or data.get("classId") != 6:
-            raise CourierError("wrong_project_type", "The bound CurseForge project must be a Minecraft Java mod.")
         return self.project(data)
 
     def pages(self, path, params, *, code):
         """Read a complete catalog listing, or fail without asserting absence."""
         self.require_key()
         result, index = [], 0
+        expected_total, seen = None, set()
         while True:
-            response = self.api.get(path + "?" + urlencode({**params, "pageSize": 50, "index": index}))
+            page_size = min(50, 10000 - index)
+            response = self.api.get(path + "?" + urlencode({**params, "pageSize": page_size, "index": index}))
             batch = response["data"]
             pagination = response.get("pagination")
             if not isinstance(batch, list) or not isinstance(pagination, dict):
                 raise CourierError(code, "CurseForge omitted listing data or pagination; cannot prove a release is absent.")
             count, total, offset = (pagination.get(key) for key in ("resultCount", "totalCount", "index"))
             if (any(type(value) is not int for value in (count, total, offset))
-                or count != len(batch) or count > 50 or offset != index
+                or count != len(batch) or count > page_size or offset != index
                 or total < index + count or (count == 0 and index < total)):
                 raise CourierError(code, "CurseForge returned inconsistent pagination; inspect the author dashboard.")
+            if expected_total is not None and total != expected_total:
+                raise CourierError(code, "CurseForge's listing changed during pagination; inspect again before uploading.")
+            expected_total = total
+            for entry in records(batch):
+                entry_id = identifier(entry["id"], numeric=True)
+                if entry_id in seen:
+                    raise CourierError(code, "CurseForge repeated a result during pagination; cannot prove a release is absent.")
+                seen.add(entry_id)
             result.extend(batch)
             index += count
             if index >= total:
@@ -108,9 +117,7 @@ class CurseForge(Connector):
             if self.key:
                 project = self.get_project(project_id)
                 if project:
-                    source = repo_url(self.config.project.get("source_url", ""))
-                    if source and project.source_url and repo_url(project.source_url) != source:
-                        raise CourierError("source_mismatch", "The bound CurseForge project points to a different source repository.")
+                    self.check_source(project)
                     author = self.settings.get("author")
                     if author and not any(a.get("name", "").casefold() == author.casefold()
                                           for a in project.raw.get("authors", [])):
@@ -145,14 +152,16 @@ class CurseForge(Connector):
 
     @staticmethod
     def remote_file(data, project):
-        if str(data["modId"]) != project.id:
+        if identifier(data["modId"], numeric=True) != project.id:
             raise CourierError("verification_failed", "CurseForge returned a file from another project.", uncertain=True)
         hashes = {}
-        for entry in data.get("hashes", []):
+        for entry in records(data.get("hashes", [])):
             algorithm = {1: "sha1", 2: "md5"}.get(entry["algo"])
             if algorithm:
                 hashes[algorithm] = entry["value"]
         versions = data.get("gameVersions", [])
+        if not isinstance(versions, list) or not all(isinstance(v, str) for v in versions):
+            raise CourierError("invalid_response", "CurseForge returned invalid compatibility tags.")
         loaders = [name for name, label in LOADERS.items() if label in versions]
         game_versions = [v for v in versions if v not in LOADERS.values() and v not in {"Client", "Server"}
                          and not v.startswith("Java ")]
@@ -167,7 +176,7 @@ class CurseForge(Connector):
             else:
                 status = "published"
         return RemoteFile(
-            str(data["id"]), data["displayName"], data["fileName"], hashes,
+            identifier(data["id"], numeric=True), data["displayName"], data["fileName"], hashes,
             status,
             f"{project.url}/files/{data['id']}", loaders, game_versions,
         )
@@ -191,12 +200,17 @@ class CurseForge(Connector):
         return [file]
 
     @api_operation()
-    def validate(self, artifacts, *, new=False):
-        publication = self.publication()
+    def validate_project(self, *, new=False):
+        self.publication()
         if not self.token:
             raise CourierError("missing_token", "Set CURSEFORGE_UPLOAD_TOKEN (or configured token_env) in the local environment.")
-        versions = self.upload_api.get("/game/versions")
+
+    @api_operation()
+    def prepare_uploads(self, artifacts):
+        publication = self.publication()
+        versions = records(self.upload_api.get("/game/versions"))
         names = {entry["name"].casefold(): entry["name"] for entry in versions}
+        prepared, resolved = {}, {}
         for artifact in artifacts:
             bootstrap = self.settings.get("bootstrap_version")
             if bootstrap and artifact.version != bootstrap:
@@ -214,29 +228,30 @@ class CurseForge(Connector):
                 raise CourierError("unsupported_version", f"CurseForge does not recognize release tags: {tags}")
             relations = []
             for target, kind in self.dependency_specs(artifact):
-                if target.isdigit():
-                    dependency = self.get_project(target)
-                else:
-                    matches = [p for p in self.search(target) if p.slug == target]
-                    dependency = matches[0] if len(matches) == 1 else None
+                if target not in resolved:
+                    if target.isascii() and target.isdigit():
+                        resolved[target] = self.get_project(target)
+                    else:
+                        matches = [p for p in self.search(target) if p.slug == target]
+                        resolved[target] = matches[0] if len(matches) == 1 else None
+                dependency = resolved[target]
                 if not dependency:
                     raise CourierError("missing_dependency", f"Cannot resolve CurseForge dependency {target}.")
                 relations.append({"projectID": dependency.id, "slug": dependency.slug, "type": RELATIONS[kind]})
-            self.metadata[artifact.key] = {
+            prepared[artifact.key] = {
                 "displayName": publication.release_name(artifact), "changelog": publication.changelog,
                 "changelogType": "markdown", "gameVersionNames": [names[tag.casefold()] for tag in tags],
                 "releaseType": self.config.release.get("type", "release"),
                 "relations": {"projects": relations}, "isMarkedForManualRelease": False,
             }
+        return prepared
 
     @api_operation(write=True)
-    def upload(self, project, artifact):
+    def upload(self, project, artifact, upload_data):
         publication = self.publication()
-        metadata = {**self.metadata[artifact.key],
-                    "displayName": publication.release_name(artifact), "changelog": publication.changelog}
         response = self.upload_api.multipart(
             "/projects/" + segment(project.id) + "/upload-file",
-            {"metadata": metadata},
+            {"metadata": upload_data},
             [("file", artifact.path, artifact.hashes["sha256"])],
         )
         if not isinstance(response, dict) or type(response.get("id")) is not int or response["id"] <= 0:
@@ -285,7 +300,7 @@ class CurseForge(Connector):
                 and review.get("remote_sha256") == digest(fields)):
                 return None
         raise CourierError(
-            "browser_required",
+            "page_review_required",
             "Set the CurseForge page title, summary and description to the reviewed English copy. "
             "Check the rendered page, then run bind curseforge PROJECT_ID --page-confirmed. "
             "The author Upload API cannot edit the project page."
