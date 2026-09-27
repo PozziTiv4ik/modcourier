@@ -59,9 +59,14 @@ class Http:
                 if len(raw) > 16 * 1024 * 1024:
                     raise CourierError("response_size", "API response exceeds 16 MiB.", uncertain=method != "GET")
                 if not raw:
+                    if method == "GET":
+                        raise CourierError("invalid_response", "API returned an empty response to a lookup.")
                     return None
                 try:
-                    return json.loads(raw)
+                    value = json.loads(raw)
+                    if value is None and method == "GET":
+                        raise CourierError("invalid_response", "API returned null instead of lookup data.")
+                    return value
                 except (ValueError, UnicodeDecodeError) as exc:
                     raise CourierError("invalid_response", "API returned invalid JSON.", uncertain=method != "GET") from exc
             except HTTPError as exc:
@@ -77,6 +82,9 @@ class Http:
                     continue
                 try:
                     raw = exc.read(2048).decode("utf-8", "replace")
+                except (OSError, HTTPException):
+                    # The HTTP status still tells us whether the write may have succeeded.
+                    raw = ""
                 finally:
                     exc.close()
                 try:

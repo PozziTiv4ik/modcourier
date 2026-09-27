@@ -3,8 +3,9 @@ import re
 
 from .connectors import REGISTRY
 from .errors import CourierError
+from .guidance import next_action
 from .inspect import local_issues
-from .models import RemoteFile, Step, same_file
+from .models import ATTENTION_STATUSES, REJECTED_STATUSES, RemoteFile, Step, check_remote_file, same_file
 from .publication import reviewed_publication
 
 
@@ -21,32 +22,32 @@ class Plan:
             "ready": not any(s.action in {"blocked", "needs_browser"} for s in self.steps),
             "steps": [s.as_dict() for s in self.steps],
             "publication_language": "en",
+            "next_actions": [next_action(s.details.get("code", "browser_required"), s.reason, s.platform)
+                             for s in self.steps if s.action in {"blocked", "needs_browser"}],
         }
 
 
-def variant_matches(artifact, remote):
-    return (not remote.loaders or set(remote.loaders) == set(artifact.loaders)) and (
-        not remote.game_versions or set(remote.game_versions) == set(artifact.game_versions)
+def variant_matches(artifact, remote, *, allow_unknown=False):
+    return ((allow_unknown and not remote.loaders) or set(remote.loaders) == set(artifact.loaders)) and (
+        (allow_unknown and not remote.game_versions) or set(remote.game_versions) == set(artifact.game_versions)
     )
 
 
 def choose_release(artifact, files):
     identical = [f for f in files if same_file(artifact, f)]
     if identical:
-        if not any(variant_matches(artifact, f) for f in identical):
-            raise CourierError("metadata_conflict", f"{artifact.path.name} exists with different loader/Minecraft tags.")
-        remote = next(f for f in identical if variant_matches(artifact, f))
-        if remote.status in {"rejected", "deleted", "archived", "failed"}:
-            raise CourierError("remote_rejected", f"Matching remote file {remote.id} is {remote.status}; resolve it in the author dashboard.")
-        if remote.status in {"draft", "testing", "unknown"}:
-            raise CourierError("browser_required", f"Matching remote file {remote.id} is {remote.status}; check its release state in the author dashboard.")
+        matching = [f for f in identical if variant_matches(artifact, f)]
+        if not matching:
+            raise CourierError("metadata_conflict", f"{artifact.path.name} exists with different or missing loader/Minecraft tags.")
+        remote = next((f for f in matching if f.status not in REJECTED_STATUSES | ATTENTION_STATUSES), matching[0])
+        check_remote_file(remote)
         return remote
     for remote in files:
         version_match = re.search(r"(?<![A-Za-z0-9._+-])v?" + re.escape(artifact.version) + r"(?![A-Za-z0-9._+-])", remote.label)
         label_match = remote.label in {artifact.key, artifact.display_name, artifact.version}
-        if remote.filename == artifact.path.name or label_match or (version_match and variant_matches(artifact, remote)):
+        if remote.filename == artifact.path.name or label_match or version_match:
             # Same release identity without the same bytes must never be overwritten.
-            if variant_matches(artifact, remote):
+            if variant_matches(artifact, remote, allow_unknown=True):
                 raise CourierError("version_conflict", f"{artifact.key} already exists with different or unverifiable content (file {remote.id}).")
     return None
 
@@ -70,7 +71,8 @@ def build_plan(config, items, state, selected=None, connectors=None):
                 connector.settings = {**connector.settings, "project_id": journal_bound}
             project = connector.discover()
             plan.projects[name] = project
-            if project and project.status in {"rejected", "withheld", "archived", "deleted"}:
+            if project and project.status in {"rejected", "withheld", "archived", "deleted", "changes_required",
+                                              "inactive", "abandoned", "unknown"}:
                 raise CourierError("project_rejected", f"The project is {project.status}; inspect its moderation messages.")
             create_record = state.operation(name + ":create")
             if project is None and create_record.get("status") in {"started", "uncertain", "accepted"}:
@@ -93,6 +95,9 @@ def build_plan(config, items, state, selected=None, connectors=None):
                     raise CourierError("version_conflict", f"{artifact.key} changed since a previous upload attempt. Resolve that release first.")
                 if previous.get("status") == "accepted" and previous.get("receipt"):
                     receipt = RemoteFile(**previous["receipt"])
+                    if not same_file(artifact, receipt):
+                        raise CourierError("verification_failed", f"The saved receipt for {key} does not match the artifact.", uncertain=True)
+                    check_remote_file(receipt)
                     actions.append(Step(name, "skip", "Upload was acknowledged; public visibility is not yet verified.",
                                         project.id if project else "", artifact, receipt))
                     continue
@@ -103,7 +108,7 @@ def build_plan(config, items, state, selected=None, connectors=None):
             uploads = [s.artifact for s in actions if s.action == "upload"]
             if uploads:
                 connector.validate(uploads, new=project is None)
-            elif name == "modrinth" and project and (project.status == "draft" or page_action):
+            elif project and (connector.needs_submission(project) or page_action):
                 # Submission still needs policy checks when every file was uploaded earlier.
                 connector.validate(items, new=False)
             if project is None:
@@ -113,7 +118,7 @@ def build_plan(config, items, state, selected=None, connectors=None):
             elif project and state.operation(name + ":update_page").get("status") in {"started", "uncertain", "failed"}:
                 plan.steps.append(Step(name, "verify_page", "The current page matches the reviewed English copy; reconcile the prior update.", project.id))
             plan.steps.extend(actions)
-            if name == "modrinth" and (project is None or project.status == "draft"):
+            if connector.needs_submission(project):
                 plan.steps.append(Step(name, "submit", "Submit the complete project for moderation.",
                                        project.id if project else ""))
         except CourierError as exc:

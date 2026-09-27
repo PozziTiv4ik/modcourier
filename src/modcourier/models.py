@@ -2,6 +2,20 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import hashlib
 
+from .errors import CourierError
+
+# These suffixes already identify project operations in schema_version 1 journals.
+RESERVED_RELEASE_IDS = {"create", "submit", "update_page", "verify_page", "blocked", "needs_browser"}
+REJECTED_STATUSES = {"rejected", "deleted", "archived", "failed", "malware_detected", "withheld"}
+ATTENTION_STATUSES = {"draft", "testing", "unknown", "changes_required", "unavailable", "deprecated", "inactive", "abandoned"}
+
+
+def check_remote_file(remote):
+    if remote.status in REJECTED_STATUSES:
+        raise CourierError("remote_rejected", f"Remote file {remote.id} is {remote.status}; resolve it in the author dashboard.")
+    if remote.status in ATTENTION_STATUSES:
+        raise CourierError("browser_required", f"Remote file {remote.id} is {remote.status}; check it in the author dashboard.")
+
 
 @dataclass
 class Dependency:
@@ -53,6 +67,15 @@ class RemoteFile:
     loaders: list[str] = field(default_factory=list)
     game_versions: list[str] = field(default_factory=list)
 
+    def __post_init__(self):
+        if (not all(isinstance(value, str) for value in
+                    (self.id, self.label, self.filename, self.status, self.url))
+            or not self.id or not isinstance(self.hashes, dict)
+            or not all(isinstance(key, str) and isinstance(value, str) for key, value in self.hashes.items())
+            or any(not isinstance(values, list) or not all(isinstance(v, str) for v in values)
+                   for values in (self.loaders, self.game_versions))):
+            raise CourierError("invalid_response", "Invalid remote file identity, hashes or compatibility tags.")
+
 
 @dataclass
 class RemoteProject:
@@ -63,6 +86,12 @@ class RemoteProject:
     url: str
     source_url: str = ""
     raw: dict = field(default_factory=dict, repr=False)
+
+    def __post_init__(self):
+        if (not all(isinstance(value, str) for value in
+                    (self.id, self.slug, self.title, self.status, self.url, self.source_url))
+            or not self.id or not isinstance(self.raw, dict)):
+            raise CourierError("invalid_response", "Invalid remote project identity or status.")
 
 
 @dataclass
@@ -101,7 +130,7 @@ def file_hashes(path: Path):
     return {name: digest.hexdigest() for name, digest in digests.items()}
 
 
-def same_file(artifact: Artifact, remote: RemoteFile):
+def same_file(artifact: Artifact | RemoteFile, remote: RemoteFile):
     for name in ("sha512", "sha256", "sha1", "md5"):
         if name in remote.hashes and name in artifact.hashes:
             return remote.hashes[name].lower() == artifact.hashes[name].lower()

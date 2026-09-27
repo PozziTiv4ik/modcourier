@@ -55,7 +55,7 @@ class RecoveryTests(unittest.TestCase):
             plan = build_plan(self.cfg, self.items, state, connectors=clients)
             execute(self.cfg, self.items, state, plan)
             self.items[0].path.unlink()
-            server.cf_files[0]["fileStatus"] = 6
+            server.cf_files[0]["fileStatus"] = 10
             with patch("modcourier.cli.REGISTRY", {name: (lambda _, c=c: c) for name, c in clients.items()}):
                 result = status(self.cfg, state)
             self.assertTrue(all(r["verified_now"] for r in result["results"]))

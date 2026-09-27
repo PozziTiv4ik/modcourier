@@ -75,11 +75,17 @@ Only path is mandatory. Per-artifact fields override the common release settings
 Loaders, mod ID and mod version come from the actual JAR. By default, a stable
 release ID combines mod version, loader and Minecraft versions, so variants remain
 distinct. release_id can match an existing naming scheme when migrating.
+The IDs create, submit, update_page, verify_page, blocked and needs_browser are
+reserved for journal operations. Repeated selection of an identical artifact
+must not assign contradictory release IDs or environments.
 
 If artifacts is omitted, discovery looks in build/libs and one-level submodules.
 Different mod IDs or stale versions require explicit selection. Each release
 artifact represents one mod; multi-mod JARs are rejected with an explanation.
 Multi-loader JAR descriptors must agree on ID and version.
+Minecraft versions, environment and license are inferred for a universal JAR only
+when its descriptors agree; complete unknown values from tested behavior and the
+actual license. init preserves unknown settings on individual loader variants.
 
 ## Dependencies
 
@@ -111,6 +117,8 @@ because its lookup or upload failed.
 
 Both platforms are enabled by default. Use `enabled: false` or the repeatable
 `--platform` CLI option to select a subset.
+Repeating the same platform does not repeat its upload. Selecting no enabled
+platform is an error.
 
 - Both: project_id, token_env.
 - Modrinth: categories and disclosures_confirmed.
@@ -133,10 +141,18 @@ not configurable.
 
 `--json` produces a single JSON document with schema_version: 1:
 
-- inspect / dry-run: ready, steps and artifacts.
-- publish: complete, results and completion time.
+- doctor: ready_for_inspect, checks, credential presence and next_actions. This is
+  a local check, not remote authorization or permission to publish.
+- inspect / dry-run: ready, steps, artifacts and next_actions.
+- publish: complete, results, completion time and next_actions.
 - status: results with verified_now for fresh platform verification.
 - expected errors: error.code, error.message and, where relevant, error.uncertain.
+  Argument errors also produce JSON when --json is present.
+
+Each next_actions entry has code, kind, instructions, documentation and, when
+relevant, platform. Common kinds: build, configure, review_copy, credentials,
+browser, reconcile, resolve_conflict and retry_read. Instructions use subcommands;
+prepend your ModCourier entry point and append --project as usual.
 
 The journal records operations separately for each platform/release. A process
 lock prevents simultaneous publishers in the same mod directory. Across separate

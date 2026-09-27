@@ -1,9 +1,12 @@
 import importlib.util
+import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from tests.helpers import jar
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,3 +26,13 @@ class ReleaseTests(unittest.TestCase):
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("ModCourier 1.0.0", result.stdout)
+            jar(Path(directory))
+            env = {**os.environ, "PYTHONPATH": ""}
+            initialized = subprocess.run([sys.executable, str(target), "init", "--json"], cwd=directory,
+                                         env=env, capture_output=True, text=True)
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            self.assertIn("config", json.loads(initialized.stdout))
+            doctor = subprocess.run([sys.executable, str(target), "doctor", "--json"], cwd=directory,
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(doctor.returncode, 2, doctor.stderr)
+            self.assertIn("next_actions", json.loads(doctor.stdout))

@@ -1,7 +1,7 @@
 import os
 import re
 
-from .base import Connector, segment
+from .base import Connector, api_operation, segment
 from ..config import local_path, repo_url
 from ..errors import CourierError
 from ..http import Http
@@ -10,6 +10,7 @@ from ..models import RemoteFile, RemoteProject, file_hashes
 
 class Modrinth(Connector):
     name = "modrinth"
+    credentials = (("token_env", "MODRINTH_TOKEN", "Modrinth author discovery and publishing", False),)
     capabilities = {"create_project": True, "upload": True, "discover": True, "page_translations": False}
 
     def __init__(self, config, http=None):
@@ -33,10 +34,19 @@ class Modrinth(Connector):
             "https://modrinth.com/mod/" + data["slug"], data.get("source_url") or "", data,
         )
 
+    @api_operation()
     def get_project(self, project_id):
         data = self.http.get("/project/" + segment(project_id), missing_ok=True)
-        return self.project(data) if data else None
+        if data is None:
+            return None
+        project = self.project(data)
+        if str(project_id) not in {project.id, project.slug}:
+            raise CourierError("invalid_response", "Modrinth returned a different project ID or slug.")
+        if data["project_type"] != "mod":
+            raise CourierError("wrong_project_type", "The bound Modrinth project must be a Minecraft Java mod.")
+        return project
 
+    @api_operation()
     def discover(self):
         user = self.authenticated()
         project_id = self.settings.get("project_id")
@@ -74,18 +84,34 @@ class Modrinth(Connector):
             raise CourierError("slug_taken", f"Modrinth slug {slug} already exists. Verify ownership and bind, or choose another slug.")
         return None
 
+    @api_operation()
     def files(self, project):
-        versions = self.http.get("/project/" + segment(project.id) + "/version")
+        return self.remote_files(self.http.get("/project/" + segment(project.id) + "/version"), project)
+
+    @api_operation()
+    def files_for(self, project, file_id):
+        version = self.http.get("/version/" + segment(file_id), missing_ok=True)
+        if version is None:
+            return []
+        if str(version["project_id"]) != project.id or str(version["id"]) != str(file_id):
+            raise CourierError("verification_failed", "Modrinth returned a version from another project or ID.", uncertain=True)
+        return self.remote_files([version], project)
+
+    @staticmethod
+    def remote_files(versions, project):
+        if not isinstance(versions, list):
+            raise CourierError("invalid_response", "Modrinth returned an invalid version list.")
         result = []
         for version in versions:
-            for file in version.get("files", []):
+            for file in version["files"]:
                 status = version.get("status", "unknown")
-                if project.status == "draft" and status in {"listed", "unlisted"}:
-                    status = "uploaded"
-                elif project.status not in {"approved", "unlisted"}:
-                    status = "pending_moderation" if project.status == "processing" else project.status
-                elif status in {"listed", "unlisted"}:
-                    status = "published"
+                if status in {"listed", "unlisted"}:
+                    if project.status == "draft":
+                        status = "uploaded"
+                    elif project.status in {"approved", "unlisted"}:
+                        status = "published"
+                    else:
+                        status = "pending_moderation" if project.status == "processing" else project.status
                 result.append(RemoteFile(
                     str(version["id"]), version["version_number"], file["filename"], file["hashes"],
                     status, f"{project.url}/version/{version['id']}",
@@ -93,6 +119,7 @@ class Modrinth(Connector):
                 ))
         return result
 
+    @api_operation()
     def validate(self, artifacts, *, new=False):
         self.publication()
         self.authenticated()
@@ -142,6 +169,7 @@ class Modrinth(Connector):
                 if not icon.is_file():
                     raise CourierError("project_metadata", "project.icon file is missing.")
 
+    @api_operation(write=True)
     def create_project(self, artifacts):
         publication = self.publication()
         values = self.config.project
@@ -164,6 +192,7 @@ class Modrinth(Connector):
             raise CourierError("invalid_response", "Modrinth did not return the created project ID.", uncertain=True)
         return self.project(response)
 
+    @api_operation(write=True)
     def upload(self, project, artifact):
         publication = self.publication()
         data = {
@@ -185,6 +214,10 @@ class Modrinth(Connector):
             "uploaded", f"{project.url}/version/{response['id']}", artifact.loaders, artifact.game_versions,
         )
 
+    def needs_submission(self, project):
+        return project is None or project.status == "draft"
+
+    @api_operation(write=True)
     def submit(self, project):
         self.publication()
         current = self.get_project(project.id)

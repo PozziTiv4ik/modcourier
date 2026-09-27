@@ -156,7 +156,7 @@ class PublishTests(unittest.TestCase):
         with service() as server:
             clients = connectors(self.cfg, server)
             server.pages = [
-                {"id": n, "displayName": f"old-{n}", "fileName": f"old-{n}.jar", "fileStatus": 6,
+                {"id": n, "modId": 42, "isAvailable": True, "displayName": f"old-{n}", "fileName": f"old-{n}.jar", "fileStatus": 10,
                  "gameVersions": ["1.21.1", "Fabric"], "hashes": []} for n in range(121)
             ]
             cf = clients["curseforge"]

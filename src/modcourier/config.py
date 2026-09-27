@@ -35,7 +35,8 @@ class Config:
         self.root = root.resolve()
         self.path = self.root / "modcourier.json"
         self.raw = read_json(self.path) if raw is None else raw
-        if not isinstance(self.raw, dict) or self.raw.get("schema_version", 1) != 1:
+        if (not isinstance(self.raw, dict) or type(self.raw.get("schema_version", 1)) is not int
+            or self.raw.get("schema_version", 1) != 1):
             raise CourierError("config_version", "modcourier.json must be a schema_version: 1 object.")
         allowed = {"schema_version", "project", "release", "artifacts", "platforms", "dependencies", "policy", "publication"}
         unknown = set(self.raw) - allowed
@@ -105,7 +106,10 @@ class Config:
             for key in ("token_env", "api_key_env"):
                 if key in settings and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", settings[key]):
                     raise CourierError("invalid_config", f"{name}.{key} must be an environment variable NAME.")
-            if name == "curseforge" and settings.get("project_id") and not str(settings["project_id"]).isdigit():
+            project_id = settings.get("project_id", "")
+            if not isinstance(project_id, str) and type(project_id) is not int:
+                raise CourierError("invalid_config", f"{name}.project_id must be a string or integer ID.")
+            if name == "curseforge" and project_id != "" and not re.fullmatch(r"[1-9][0-9]*", str(project_id)):
                 raise CourierError("invalid_config", "CurseForge project_id must be a numeric ID.")
             if name == "modrinth" and settings.get("project_id") and not re.fullmatch(r"[A-Za-z0-9_-]+", str(settings["project_id"])):
                 raise CourierError("invalid_config", "Invalid Modrinth project ID or slug.")
@@ -126,8 +130,13 @@ class Config:
         return self.platforms.get(platform, {})
 
     def enabled(self, selection=None):
-        names = selection or list(PLATFORMS)
-        return [name for name in names if self.platforms.get(name, {}).get("enabled", True)]
+        names = list(dict.fromkeys(selection or PLATFORMS))
+        if any(name not in PLATFORMS for name in names):
+            raise CourierError("invalid_platform", "Choose a registered publication platform.")
+        enabled = [name for name in names if self.settings(name).get("enabled", True)]
+        if not enabled:
+            raise CourierError("no_platforms", "No selected platform is enabled. Enable a target in modcourier.json.")
+        return enabled
 
     def text(self, section, field):
         settings = self.raw.get(section, {})

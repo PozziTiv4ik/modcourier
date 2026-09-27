@@ -15,6 +15,8 @@ partial deliveries without blindly uploading the same file again.
 **Agents: start at [AGENTS.md](AGENTS.md).** It explains how to locate the user's
 mod, inspect existing releases, configure the publisher and finish the job.
 The agent uses its existing terminal/browser tools; ModCourier has no model subscription.
+Start with `doctor --project /path/to/your-mod --json` for a local setup check.
+Then follow `next_actions` in the output; each action links to the relevant document.
 
 **Website publications are English-only.** The agent translates and reviews the
 title, summary, description and release notes even when your conversation or mod
@@ -33,7 +35,7 @@ so ModCourier does not append extra language sections.
 | English project page | Create/update reviewed copy through API | Prepared copy and verified author-website step |
 | Check file identity | SHA-512 / SHA-1 | SHA-1 / MD5 from catalog |
 | Resume after partial failure | Durable journal and remote reconciliation | Durable journal and remote reconciliation |
-| Verify public availability | Version and project status | Catalog file status; hidden/pending files remain unverified |
+| Verify public availability | Version, project and exact file hash | Catalog status, download availability and exact file hash |
 
 Fabric, Forge, NeoForge and Quilt are supported. A release can contain multiple
 loader/Minecraft variants. Source JARs, stale builds, ambiguous matches and version
@@ -48,11 +50,12 @@ Use `modcourier.py` from this checkout for the current English-publication workf
 No installation step:
 
 ```sh
+python /path/to/ModCourier/modcourier.py doctor --project /path/to/your-mod --json
+# If configuration is missing:
 python /path/to/ModCourier/modcourier.py init --project /path/to/your-mod
 # Prepare/read the English copy in modcourier.json and its referenced files, then:
 python /path/to/ModCourier/modcourier.py review-language --language en --project /path/to/your-mod
 python /path/to/ModCourier/modcourier.py inspect --project /path/to/your-mod --json
-python /path/to/ModCourier/modcourier.py publish --project /path/to/your-mod --dry-run
 python /path/to/ModCourier/modcourier.py publish --project /path/to/your-mod
 python /path/to/ModCourier/modcourier.py status --project /path/to/your-mod
 ```
@@ -101,15 +104,20 @@ flowchart LR
 - A lookup failed → report uncertainty; never interpret it as an empty account.
 - Website copy is untranslated or changed since review → prepare English copy before any upload.
 
-`inspect` and `publish --dry-run` perform reads only. `publish` records its work in
-`.modcourier/`, writes a report, and prepares `handoff.md` / `handoff.json` if a browser
-step is needed. Accepted, pending moderation and publicly published are distinct outcomes.
+`doctor` checks local setup without contacting either service. `inspect` and
+`publish --dry-run` perform reads only. Plans, errors and publish reports include
+`next_actions` with a task kind, concrete instructions and a documentation link.
+`publish` saves its report and any remaining tasks in `.modcourier/handoff.md` /
+`handoff.json`, including failures during execution. Resolved handoffs are removed.
+Accepted, pending moderation and publicly published are distinct outcomes.
 
 ## Small, extendable structure
 
 ```text
 src/modcourier/
   cli.py           commands and JSON output
+  diagnostics.py   local onboarding and credential-presence checks
+  guidance.py      shared next actions for output and handoffs
   models.py        shared project, artifact and result types
   publication.py   reviewed English copy shared by APIs and browser handoffs
   inspect.py       local discovery and validation
@@ -123,6 +131,7 @@ src/modcourier/
 
 Add a platform by implementing one connector and registering it.
 Add a loader through one metadata reader. See [extending](docs/extending.md).
+The [audit notes](docs/audit.md) explain the corrected failure scenarios and validation limits.
 
 ## Development and verification
 

@@ -8,26 +8,34 @@ import sys
 from . import __version__
 from .config import Config, PLATFORMS
 from .connectors import REGISTRY
-from .connectors.base import segment
+from .diagnostics import diagnose
 from .errors import CourierError
+from .guidance import next_action
 from .handoff import prepare
 from .inspect import artifacts, local_issues, suggested_config
-from .models import same_file
-from .planner import build_plan
+from .models import RemoteFile, RESERVED_RELEASE_IDS, check_remote_file
+from .planner import build_plan, variant_matches
 from .publication import Publication
 from .runner import execute
 from .state import State, atomic_json
+
+
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise CourierError("invalid_argument", message)
 
 
 def parser():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--project", default=argparse.SUPPRESS, help="Mod directory (default: current directory)")
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Stable machine-readable JSON")
-    cli = argparse.ArgumentParser(prog="modcourier", parents=[common], description="Publish Minecraft Java mods with an auditable, resumable plan.")
+    cli = ArgumentParser(prog="modcourier", parents=[common], description="Publish Minecraft Java mods with an auditable, resumable plan.")
     cli.add_argument("--version", action="version", version="ModCourier " + __version__)
     commands = cli.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init", parents=[common], help="Create configuration from built release JARs")
     init.add_argument("--artifact", action="append", help="Relative path to a selected JAR (repeat for variants)")
+    doctor = commands.add_parser("doctor", parents=[common], help="Check local setup and credential presence without network access or writes")
+    doctor.add_argument("--platform", choices=PLATFORMS, action="append")
     inspect = commands.add_parser("inspect", parents=[common], help="Read metadata and discover remote releases")
     inspect.add_argument("--offline", action="store_true", help="Inspect local files without contacting platforms")
     inspect.add_argument("--platform", choices=PLATFORMS, action="append")
@@ -68,6 +76,10 @@ def emit(value, machine=False):
             lines.append(value["message"])
         for problem in value.get("issues", []):
             lines.append("  ! " + problem)
+        for check in value.get("checks", []):
+            lines.append(f"  {check['name']}: {check['status']}")
+        for credential in value.get("credentials", []):
+            lines.append(f"  {credential['variable']}: " + ("present" if credential["present"] else "missing"))
         for item in value.get("artifacts", []):
             lines.append(f"  {item['title']} {item['version']} | {', '.join(item['loaders'])} | {', '.join(item['game_versions']) or 'Minecraft versions needed'}")
         for step in value.get("steps", value.get("results", [])):
@@ -76,7 +88,7 @@ def emit(value, machine=False):
             if step.get("url"):
                 lines.append("    " + step["url"])
         if value.get("handoff"):
-            lines.append("  Browser handoff: " + value["handoff"])
+            lines.append("  Next-step handoff: " + value["handoff"])
         if value.get("error"):
             lines.append("  " + value["error"]["code"] + ": " + value["error"]["message"])
         if value.get("note"):
@@ -86,6 +98,8 @@ def emit(value, machine=False):
             lines.append("  Publication language: English; " + ("reviewed" if publication["reviewed"] else "translation/review needed"))
             if publication.get("issue"):
                 lines.append("  " + publication["issue"]["message"])
+        for action in value.get("next_actions", []):
+            lines.append("  Next (" + action["kind"] + "): " + " ".join(action["instructions"]))
         output = "\n".join(lines)
     # Defense in depth: never emit active token values, even in platform error text.
     for key, secret in os.environ.items():
@@ -103,7 +117,8 @@ def ensure_ignore(root):
 
 def status(config, state):
     results = []
-    by_platform = {}
+    actions = []
+    connectors, projects = {}, {}
     for key, operation in state.data["operations"].items():
         if not operation.get("receipt"):
             if operation.get("status") in {"started", "uncertain", "failed"}:
@@ -111,35 +126,46 @@ def status(config, state):
                                 "status": operation["status"], "message": "Inspect the journal and author dashboard."})
             continue
         name = key.split(":")[0]
-        receipt = operation["receipt"]
+        receipt = RemoteFile(**operation["receipt"])
         message = "Last acknowledged upload; current public status could not be verified."
         fresh = None
+        error = None
         try:
-            if name not in by_platform:
-                connector = REGISTRY[name](config)
-                project = connector.get_project(operation["project_id"])
-                by_platform[name] = connector.files(project) if project else []
-            fresh = next((f for f in by_platform[name] if f.id == receipt["id"]
-                          and any(f.hashes.get(h) == value for h, value in receipt["hashes"].items())), None)
+            if name not in connectors:
+                connectors[name] = REGISTRY[name](config)
+            connector = connectors[name]
+            project_key = (name, operation["project_id"])
+            if project_key not in projects:
+                projects[project_key] = connector.get_project(operation["project_id"])
+            project = projects[project_key]
+            fresh = connector.find_file(project, receipt.id, receipt) if project else None
             if fresh:
-                receipt = asdict(fresh)
+                receipt = fresh
                 message = "Verified against the platform."
         except CourierError as exc:
             message = str(exc)
-        results.append({"platform": name, "key": key, "status": receipt["status"] if fresh else "accepted_unverified",
+            error = exc
+        fallback = operation["status"] if operation["status"] in {"started", "uncertain", "failed"} else "accepted_unverified"
+        if error and error.code == "verification_failed":
+            fallback = "uncertain"
+            actions.append(next_action(error.code, str(error), name))
+        results.append({"platform": name, "key": key, "status": receipt.status if fresh else fallback,
                         "last_known_status": operation["receipt"]["status"],
-                        "url": receipt["url"], "message": message, "verified_now": fresh is not None})
-    return {"schema_version": 1, "results": results,
+                        "journal_status": operation["status"],
+                        "url": receipt.url, "message": message, "verified_now": fresh is not None})
+    return {"schema_version": 1, "results": results, "next_actions": actions,
             "message": "No recorded uploads." if not results else "Recorded release status."}
 
 
 def recover(config, state, args):
     key = args.platform + ":" + args.release_id
     previous = state.operation(key)
+    if args.release_id in RESERVED_RELEASE_IDS or not previous.get("sha256") or not previous.get("project_id"):
+        raise CourierError("not_upload", "Recovery applies only to file uploads. For uncertain project creation, locate the draft and bind its ID.")
     if previous.get("status") not in {"started", "uncertain"}:
         raise CourierError("not_uncertain", "Only an uncertain upload can be recovered.")
     if args.absent:
-        state.record(key, status="failed", recovery={"absent": True, "evidence": args.evidence})
+        state.record(key, status="failed", receipt=None, recovery={"absent": True, "evidence": args.evidence})
         return {"message": "Absence recorded. The next publish may attempt this upload again."}
     items = artifacts(config)
     artifact = next((a for a in items if a.key == args.release_id), None)
@@ -149,13 +175,12 @@ def recover(config, state, args):
     project = connector.get_project(previous["project_id"])
     if not project:
         raise CourierError("project_inaccessible", "The project is not visible to the API. Keep the journal and verify in the dashboard.")
-    if args.platform == "curseforge":
-        data = connector.api.get(f"/v1/mods/{segment(project.id)}/files/{segment(args.file_id)}")["data"]
-        remote = connector.remote_file(data, project)
-    else:
-        remote = next((f for f in connector.files(project) if f.id == args.file_id and same_file(artifact, f)), None)
-    if not remote or not same_file(artifact, remote):
+    remote = connector.find_file(project, args.file_id, artifact)
+    if not remote:
         raise CourierError("verification_failed", "Remote file does not match the original artifact hash.")
+    if not variant_matches(artifact, remote):
+        raise CourierError("metadata_conflict", "Remote file has different or missing loader/Minecraft tags.")
+    check_remote_file(remote)
     state.record(key, status="accepted", receipt=asdict(remote), recovery={"evidence": args.evidence})
     return {"message": "Recovered the acknowledged file; a repeated publish will not duplicate it."}
 
@@ -165,6 +190,9 @@ def dispatch(args):
     if not root.is_dir():
         raise CourierError("missing_project", "The --project directory does not exist.")
     config = Config(root)
+    if args.command == "doctor":
+        result = diagnose(config, args.platform)
+        return result, 0 if result["ready_for_inspect"] else 2
     if args.command == "init":
         if config.path.exists():
             raise CourierError("config_exists", "modcourier.json already exists; edit it instead of overwriting it.")
@@ -196,9 +224,10 @@ def dispatch(args):
             raise CourierError("invalid_argument", "--new applies only to browser-created CurseForge projects.")
         state = State(root)
         with state.lock():
+            config = Config(root)
             state = State(root)
-            existing = config.settings(args.platform).get("project_id") or state.data["projects"].get(args.platform)
-            if existing and str(existing) != args.project_id:
+            existing = [config.settings(args.platform).get("project_id"), state.data["projects"].get(args.platform)]
+            if any(value and str(value) != args.project_id for value in existing):
                 raise CourierError("binding_conflict", "This directory is already bound to another project.")
             extra = {}
             if args.new:
@@ -223,15 +252,16 @@ def dispatch(args):
         return {"message": f"Bound {args.platform} to {args.project_id}. Run inspect to verify the release plan."}, 0
     if args.command == "recover":
         with State(root).lock():
-            return recover(config, State(root), args), 0
-    items = artifacts(config)
+            return recover(Config(root), State(root), args), 0
     if args.command == "inspect" and args.offline:
+        items = artifacts(config)
         return {"schema_version": 1, "artifacts": [a.as_dict() for a in items],
                 "publication": Publication.read(config).preview(config),
                 "issues": local_issues(config, items), "message": "Local inspection; platforms were not contacted."}, 0
     if not config.path.exists():
         raise CourierError("missing_config", "Run init once to create modcourier.json.")
     if args.command == "inspect" or args.dry_run:
+        items = artifacts(config)
         plan = build_plan(config, items, State(root), args.platform)
         return {**plan.as_dict(), "artifacts": [a.as_dict() for a in items],
                 "publication": Publication.read(config).preview(config)}, 0 if plan.as_dict()["ready"] else 2
@@ -241,16 +271,19 @@ def dispatch(args):
         items = artifacts(config)
         state = State(root)
         plan = build_plan(config, items, state, args.platform)
-        prepare(config, items, plan, state.directory)
         report = execute(config, items, state, plan)
-        if any(step.action in {"blocked", "needs_browser"} for step in plan.steps):
-            report["handoff"] = str(state.directory / "handoff.md")
+        handoff = prepare(config, items, plan, state.directory, report)
+        if handoff:
+            report["handoff"] = handoff
+        atomic_json(state.directory / "report.json", report)
         return report, 0 if report["complete"] else 2
 
 
 def main(argv=None):
-    args = parser().parse_args(argv)
+    argv = sys.argv[1:] if argv is None else argv
+    machine = "--json" in argv
     try:
+        args = parser().parse_args(argv)
         result, code = dispatch(args)
     except CourierError as exc:
         result, code = {"schema_version": 1, "error": exc.as_dict()}, 2
@@ -258,5 +291,8 @@ def main(argv=None):
         result, code = {"message": "Interrupted. Keep .modcourier/state.json; inspect before resuming."}, 130
     except (OSError, ValueError, KeyError, TypeError) as exc:
         result, code = {"error": {"code": "invalid_input", "message": f"{type(exc).__name__}: {exc}"}}, 2
-    emit(result, getattr(args, "json", False))
+    result.setdefault("schema_version", 1)
+    if "error" in result:
+        result["next_actions"] = [next_action(result["error"]["code"], result["error"]["message"])]
+    emit(result, machine)
     return code

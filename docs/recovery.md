@@ -27,7 +27,9 @@ python modcourier.py recover curseforge 1.0.0+fabric.mc1.21.1 \
   --project /path/to/mod
 ```
 
-The command verifies the remote hash before recording acknowledgement.
+The command verifies the project, strongest common file hash and compatibility
+tags before recording acknowledgement. A version with multiple files is searched
+for the matching bytes. Rejected or unusable files must be resolved in the dashboard.
 
 Only after verifying in the authenticated author dashboard that **no matching
 upload exists**, record that observation:
@@ -46,7 +48,7 @@ state until its result can be established. Do not upload another copy.
 
 For an uncertain **project creation**, find the draft in the author account and
 bind its ID. The publisher will not create a second project while creation is
-uncertain.
+uncertain. File recovery cannot clear project-creation or page-update operations.
 
 ## Same version, different content
 
@@ -73,3 +75,6 @@ Publication cannot accelerate the platform's review queue. status reports the
 current API view. A server acknowledgement or exit code 0 does not mean approval.
 The journal's last acknowledged status is marked as unverified if a current
 remote check is unavailable.
+`status` also returns journal_status so an unresolved operation remains visible.
+If a remote hash disagrees with its saved receipt, status reports uncertainty
+instead of trusting a matching weaker hash.

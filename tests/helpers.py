@@ -63,7 +63,7 @@ def review_copy(cfg):
 
 class Service:
     def __init__(self):
-        self.mr_project = {"id": "mr1", "slug": "demo", "title": "Demo", "status": "approved",
+        self.mr_project = {"id": "mr1", "slug": "demo", "title": "Demo", "status": "approved", "project_type": "mod",
                            "description": "A test mod.", "body": "A complete test description.",
                            "source_url": "https://github.com/author/demo"}
         self.mr_versions = []
@@ -122,6 +122,9 @@ class Service:
                     return (200, self.mr_project, {}) if self.mr_project else (404, {}, {})
                 if p == "/project/mr1/version":
                     return 200, self.mr_versions, {}
+                if p.startswith("/version/"):
+                    version = next((v for v in self.mr_versions if v["id"] == p.split("/")[-1]), None)
+                    return (200, version, {}) if version else (404, {}, {})
             if method == "PATCH" and p == "/project/mr1":
                 data = json.loads(raw)
                 self.mr_project.update(data)
@@ -134,7 +137,7 @@ class Service:
             parts = parse_multipart(headers, raw) if raw else {}
             if method == "POST" and p == "/project":
                 data = json.loads(parts["data"])
-                self.mr_project = {"id": "mr1", "slug": data["slug"], "title": data["title"], "status": "draft",
+                self.mr_project = {"id": "mr1", "slug": data["slug"], "title": data["title"], "status": "draft", "project_type": "mod",
                                    "description": data["description"], "body": data["body"],
                                    "source_url": data.get("source_url", "")}
                 self.mr_creates += 1
@@ -161,7 +164,7 @@ class Service:
             file = parts["file"]
             self.cf_uploads += 1
             result = {"id": 100 + self.cf_uploads, "displayName": data["displayName"], "fileName": parts["filename"],
-                      "fileStatus": 1, "gameVersions": data["gameVersionNames"],
+                      "fileStatus": 3, "modId": 42, "isAvailable": True, "gameVersions": data["gameVersionNames"],
                       "hashes": [{"algo": 1, "value": hashlib.sha1(file).hexdigest()}]}
             self.cf_files.append(result)
             if self.accept_then_fail_cf:
@@ -177,13 +180,13 @@ class Service:
                 index = int(dict(parse_qsl(urlsplit(path).query)).get("index", 0))
                 batch = self.pages[index:index + 50]
                 return 200, {"data": batch, "pagination": {"index": index, "resultCount": len(batch), "totalCount": len(self.pages)}}, {}
-            return 200, {"data": self.cf_files, "pagination": {"resultCount": len(self.cf_files), "totalCount": len(self.cf_files)}}, {}
+            return 200, {"data": self.cf_files, "pagination": {"index": 0, "resultCount": len(self.cf_files), "totalCount": len(self.cf_files)}}, {}
         if path_only.startswith("/cf/v1/mods/42/files/"):
             file_id = int(path_only.split("/")[-1])
             data = next((f for f in self.cf_files if f["id"] == file_id), None)
             return (200, {"data": data}, {}) if data else (404, {}, {})
         if path_only == "/cf/v1/mods/search":
-            return 200, {"data": [], "pagination": {"resultCount": 0, "totalCount": 0}}, {}
+            return 200, {"data": [], "pagination": {"index": 0, "resultCount": 0, "totalCount": 0}}, {}
         return 404, {"message": "unknown fixture route: " + method + " " + path}, {}
 
 

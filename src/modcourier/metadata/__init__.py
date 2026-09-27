@@ -6,7 +6,7 @@ import tomllib
 import zipfile
 
 from ..errors import CourierError
-from ..models import Artifact, Dependency, file_hashes
+from ..models import Artifact, Dependency, RESERVED_RELEASE_IDS, file_hashes
 from . import fabric, forge, neoforge, quilt
 
 BUILTINS = {"minecraft", "java", "fabricloader", "forge", "neoforge", "quilt_loader"}
@@ -56,16 +56,26 @@ def read_artifact(path: Path, overrides=None):
                 parsed.append(forge.parse(tomllib.loads(read("META-INF/mods.toml")), manifest))
             if not parsed:
                 raise CourierError("not_a_mod", f"{path.name} has no supported mod descriptor.")
-    except (OSError, zipfile.BadZipFile, ValueError, KeyError, TypeError) as exc:
+    except (OSError, zipfile.BadZipFile, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise CourierError("invalid_artifact", f"Cannot read mod metadata in {path.name}: {exc}") from exc
+    for descriptor in parsed:
+        if any(not isinstance(descriptor.get(key), str) for key in
+               ("mod_id", "version", "title", "description", "license", "environment")):
+            raise CourierError("invalid_artifact", f"{path.name}: metadata text fields must be strings.")
     if len({p["mod_id"] for p in parsed}) != 1 or len({p["version"] for p in parsed}) != 1:
         raise CourierError("mixed_metadata", f"{path.name}: loader descriptors disagree about ID or version.")
-    data = parsed[0]
+    data = dict(parsed[0])
     data["loaders"] = sorted({loader for p in parsed for loader in p["loaders"]})
     data["dependencies"] = [Dependency(*item) for item in sorted({
         (d[0], d[1]) for p in parsed for d in p["dependencies"] if d[0] not in BUILTINS
     })]
-    data["game_versions"] = exact_versions(data.pop("minecraft", ""))
+    # A universal JAR must not inherit compatibility from just its first loader.
+    versions = [exact_versions(p.get("minecraft", "")) for p in parsed]
+    data.pop("minecraft", None)
+    data["game_versions"] = versions[0] if all(v == versions[0] for v in versions) else []
+    for key in ("environment", "license"):
+        if len({p[key] for p in parsed}) > 1:
+            data[key] = ""
     for key in ("game_versions", "environment", "release_id"):
         if key in overrides:
             data[key] = overrides[key]
@@ -73,6 +83,8 @@ def read_artifact(path: Path, overrides=None):
         raise CourierError("invalid_config", "game_versions must be an array of exact version strings.")
     if data.get("release_id") and not re.fullmatch(r"[A-Za-z0-9_.+-]+", data["release_id"]):
         raise CourierError("invalid_config", "release_id must contain only letters, digits, dots, hyphens, underscores and plus signs.")
+    if data.get("release_id") in RESERVED_RELEASE_IDS:
+        raise CourierError("invalid_config", "release_id is reserved for a journal operation; choose another release ID.")
     artifact = Artifact(path=path.resolve(), hashes=file_hashes(path), **data)
     if not artifact.version or ("$" + "{") in artifact.version:
         raise CourierError("unresolved_version", f"{path.name}: build the release JAR so its version is resolved.")

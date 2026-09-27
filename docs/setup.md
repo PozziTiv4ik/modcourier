@@ -2,6 +2,9 @@
 
 ModCourier runs on the author's computer or CI runner. Each author provides their
 own platform credentials. A public copy of ModCourier never includes a shared key.
+Run `doctor --project /path/to/mod --json` to check local setup and the presence of
+configured credential variables. It does not print values or validate tokens over
+the network. A missing CurseForge catalog key can use the documented browser route.
 
 ## Modrinth
 
@@ -118,10 +121,15 @@ ModCourier does not automatically load .env files.
 
 - `published`: the platform currently reports the file available.
 - `pending_moderation`: uploaded and awaiting review.
+- `processing`: the platform is still processing the file.
+- `early_access`: downloadable under the platform's early-access restrictions,
+  not unrestricted public availability.
 - `uploaded` / `accepted_unverified`: acknowledgement received; public visibility
   has not been independently verified yet.
 - `blocked` / `needs_browser`: a specific prerequisite needs attention.
 - `uncertain`: the request may have succeeded; reconcile before retrying.
+- Rejected, unavailable, archived, malware-detected or otherwise unusable files
+  require attention and never count as a successfully completed publish.
 
 Exit code 0 from publish means all planned operations completed, including skips.
 It does **not** mean the moderation team has approved everything. Code 2 means
@@ -135,5 +143,5 @@ at least one action needs attention; code 130 means the command was interrupted.
 - [CurseForge author Upload API](https://support.curseforge.com/support/solutions/articles/9000197321)
 - [CurseForge catalog API](https://docs.curseforge.com/rest-api/)
 
-Implementation checked against these interfaces on 2026-09-26. Platform policy
+Implementation checked against these interfaces on 2026-09-27. Platform policy
 and access requirements can change independently of ModCourier.

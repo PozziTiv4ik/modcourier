@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 
 from .errors import CourierError
+from .models import RemoteFile
 
 
 def now():
@@ -42,18 +43,31 @@ class State:
         self.directory = root / ".modcourier"
         self.path = self.directory / "state.json"
         self.data = read_json(self.path, {"schema_version": 1, "operations": {}, "projects": {}})
-        if not isinstance(self.data, dict) or self.data.get("schema_version") != 1:
+        if (not isinstance(self.data, dict) or type(self.data.get("schema_version")) is not int
+            or self.data.get("schema_version") != 1):
             raise CourierError("state_version", "Unsupported state version; keep the journal and upgrade ModCourier.")
         if not isinstance(self.data.get("operations"), dict) or not isinstance(self.data.get("projects"), dict):
             raise CourierError("invalid_state", "Invalid journal. Restore it before publishing.")
         if any(not isinstance(v, dict) for v in self.data["operations"].values()):
             raise CourierError("invalid_state", "Invalid operation in the journal. Restore it before publishing.")
+        for operation in self.data["operations"].values():
+            if operation.get("receipt") is not None:
+                try:
+                    RemoteFile(**operation["receipt"])
+                    if not operation.get("project_id"):
+                        raise ValueError("Missing project ID")
+                except (CourierError, TypeError, ValueError) as exc:
+                    raise CourierError("invalid_state", "Invalid upload receipt in the journal. Restore it before publishing.") from exc
 
     def operation(self, key):
         return self.data["operations"].get(key, {})
 
     def record(self, key, **values):
         entry = dict(self.operation(key))
+        if values.get("status") in {"started", "accepted"}:
+            entry.pop("error", None)
+        if values.get("status") == "started":
+            entry.pop("receipt", None)
         entry.update(values, updated_at=now())
         self.data["operations"][key] = entry
         atomic_json(self.path, self.data)

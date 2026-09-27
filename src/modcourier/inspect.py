@@ -16,7 +16,7 @@ def artifacts(config: Config):
         entries = [{"path": str(p.relative_to(config.root))} for p in paths if not EXCLUDED.search(p.name)]
     if not isinstance(entries, list):
         raise CourierError("invalid_config", "artifacts must be a list of paths or objects with path.")
-    result, seen = [], set()
+    result, seen = [], {}
     for entry in entries:
         entry = {"path": entry} if isinstance(entry, str) else entry
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
@@ -37,9 +37,13 @@ def artifacts(config: Config):
         overrides.update({k: v for k, v in entry.items() if k != "path"})
         artifact = read_artifact(path, overrides)
         signature = (artifact.hashes["sha256"], tuple(artifact.game_versions), tuple(artifact.loaders))
-        if signature not in seen:
-            result.append(artifact)
-            seen.add(signature)
+        previous = seen.get(signature)
+        if previous:
+            if previous.key != artifact.key or previous.environment != artifact.environment:
+                raise CourierError("duplicate_variant", "The same file and compatibility tags have conflicting release IDs or environments.")
+            continue
+        result.append(artifact)
+        seen[signature] = artifact
     if not result:
         raise CourierError("no_artifacts", "No release JAR found. Run this mod's Gradle build, then inspect again.")
     if len({a.mod_id for a in result}) != 1:
@@ -90,7 +94,7 @@ def suggested_config(root, items):
         },
         "artifacts": [{"path": str(a.path.relative_to(root)).replace("\\", "/"),
                        **({"game_versions": a.game_versions} if a.game_versions != first.game_versions else {}),
-                       **({"environment": a.environment} if a.environment and a.environment != first.environment else {})}
+                       **({"environment": a.environment} if a.environment != first.environment else {})}
                       for a in items],
         "platforms": {
             "modrinth": {"enabled": True, "categories": [], "token_env": "MODRINTH_TOKEN"},

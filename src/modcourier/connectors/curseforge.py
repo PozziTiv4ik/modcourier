@@ -1,18 +1,27 @@
 import os
 from urllib.parse import urlencode
 
-from .base import Connector, segment
+from .base import Connector, api_operation, segment
 from ..config import repo_url
 from ..errors import CourierError
 from ..http import Http
 from ..models import RemoteFile, RemoteProject
 from ..publication import check_copy, digest
 
+# Official catalog enums: https://docs.curseforge.com/rest-api/#filestatus
 FILE_STATUSES = {
-    1: "pending_moderation", 2: "pending_moderation", 3: "pending_moderation",
-    4: "processing", 5: "pending_moderation", 6: "published", 7: "rejected",
-    8: "rejected", 9: "deleted", 10: "archived", 11: "testing", 12: "draft",
-    13: "pending_moderation", 14: "failed", 15: "processing",
+    1: "processing", 2: "changes_required", 3: "pending_moderation",
+    4: "approved", 5: "rejected", 6: "malware_detected", 7: "deleted",
+    8: "archived", 9: "testing", 10: "released", 11: "pending_moderation",
+    12: "deprecated", 13: "processing", 14: "processing", 15: "failed",
+    16: "processing", 17: "processing", 18: "pending_moderation",
+    19: "processing", 20: "processing", 21: "processing",
+    22: "processing", 23: "processing",
+}
+PROJECT_STATUSES = {
+    1: "draft", 2: "changes_required", 3: "pending_moderation", 4: "published",
+    5: "rejected", 6: "pending_moderation", 7: "inactive", 8: "abandoned",
+    9: "deleted", 10: "pending_moderation",
 }
 RELATIONS = {"required": "requiredDependency", "optional": "optionalDependency",
              "incompatible": "incompatible", "embedded": "embeddedLibrary"}
@@ -21,6 +30,10 @@ LOADERS = {"fabric": "Fabric", "forge": "Forge", "neoforge": "NeoForge", "quilt"
 
 class CurseForge(Connector):
     name = "curseforge"
+    credentials = (
+        ("token_env", "CURSEFORGE_UPLOAD_TOKEN", "CurseForge uploads", False),
+        ("api_key_env", "CURSEFORGE_API_KEY", "CurseForge catalog discovery and verification", True),
+    )
 
     def __init__(self, config, api=None, upload_api=None):
         super().__init__(config)
@@ -42,40 +55,53 @@ class CurseForge(Connector):
         links = data.get("links", {})
         return RemoteProject(
             str(data["id"]), data["slug"], data["name"],
-            "published" if data.get("status") == 4 else "pending_moderation",
+            PROJECT_STATUSES.get(data.get("status"), "unknown"),
             links.get("websiteUrl") or "https://www.curseforge.com/minecraft/mc-mods/" + data["slug"],
             links.get("sourceUrl") or "", data,
         )
 
+    @api_operation()
     def get_project(self, project_id):
         self.require_key()
         response = self.api.get("/v1/mods/" + segment(project_id), missing_ok=True)
-        if not response:
+        if response is None:
             return None
-        data = response.get("data")
-        if not data:
-            return None
+        data = response["data"]
+        if str(data["id"]) != str(project_id):
+            raise CourierError("invalid_response", "CurseForge returned a different project ID.")
         if data.get("gameId") != 432 or data.get("classId") != 6:
             raise CourierError("wrong_project_type", "The bound CurseForge project must be a Minecraft Java mod.")
         return self.project(data)
 
-    def search(self, query):
+    def pages(self, path, params, *, code):
+        """Read a complete catalog listing, or fail without asserting absence."""
         self.require_key()
         result, index = [], 0
         while True:
-            response = self.api.get("/v1/mods/search?" + urlencode({
-                "gameId": 432, "classId": 6, "searchFilter": query, "pageSize": 50, "index": index,
-            }))
+            response = self.api.get(path + "?" + urlencode({**params, "pageSize": 50, "index": index}))
             batch = response["data"]
-            result.extend(self.project(item) for item in batch)
-            pagination = response.get("pagination", {})
-            count = pagination.get("resultCount", len(batch))
+            pagination = response.get("pagination")
+            if not isinstance(batch, list) or not isinstance(pagination, dict):
+                raise CourierError(code, "CurseForge omitted listing data or pagination; cannot prove a release is absent.")
+            count, total, offset = (pagination.get(key) for key in ("resultCount", "totalCount", "index"))
+            if (any(type(value) is not int for value in (count, total, offset))
+                or count != len(batch) or count > 50 or offset != index
+                or total < index + count or (count == 0 and index < total)):
+                raise CourierError(code, "CurseForge returned inconsistent pagination; inspect the author dashboard.")
+            result.extend(batch)
             index += count
-            if not count or index >= pagination.get("totalCount", index):
+            if index >= total:
                 return result
             if index >= 10000:
-                raise CourierError("search_incomplete", "CurseForge search exceeded its result window; bind a verified project ID.")
+                raise CourierError(code, "CurseForge's result window was exhausted; cannot prove a release is absent.")
 
+    @api_operation()
+    def search(self, query):
+        return [self.project(data) for data in self.pages("/v1/mods/search", {
+            "gameId": 432, "classId": 6, "searchFilter": query,
+        }, code="search_incomplete")]
+
+    @api_operation()
     def discover(self):
         project_id = self.settings.get("project_id")
         if project_id:
@@ -119,6 +145,8 @@ class CurseForge(Connector):
 
     @staticmethod
     def remote_file(data, project):
+        if str(data["modId"]) != project.id:
+            raise CourierError("verification_failed", "CurseForge returned a file from another project.", uncertain=True)
         hashes = {}
         for entry in data.get("hashes", []):
             algorithm = {1: "sha1", 2: "md5"}.get(entry["algo"])
@@ -128,29 +156,41 @@ class CurseForge(Connector):
         loaders = [name for name, label in LOADERS.items() if label in versions]
         game_versions = [v for v in versions if v not in LOADERS.values() and v not in {"Client", "Server"}
                          and not v.startswith("Java ")]
+        status = FILE_STATUSES.get(data.get("fileStatus"), "unknown")
+        if status in {"approved", "released"}:
+            if data.get("isAvailable") is not True:
+                status = "unavailable"
+            elif project.status != "published":
+                status = project.status
+            elif data.get("isEarlyAccessContent"):
+                status = "early_access"
+            else:
+                status = "published"
         return RemoteFile(
             str(data["id"]), data["displayName"], data["fileName"], hashes,
-            FILE_STATUSES.get(data.get("fileStatus"), "unknown"),
+            status,
             f"{project.url}/files/{data['id']}", loaders, game_versions,
         )
 
+    @api_operation()
     def files(self, project):
         if project.raw.get("bootstrap"):
             return []
-        self.require_key()
-        result, index = [], 0
-        while True:
-            response = self.api.get("/v1/mods/" + segment(project.id) + "/files?" + urlencode({"index": index, "pageSize": 50}))
-            batch = response["data"]
-            result.extend(self.remote_file(data, project) for data in batch)
-            pagination = response.get("pagination", {})
-            count = pagination.get("resultCount", len(batch))
-            index += count
-            if not count or index >= pagination.get("totalCount", index):
-                return result
-            if index >= 10000:
-                raise CourierError("listing_incomplete", "CurseForge's file window was exhausted. Cannot prove a release is absent.")
+        return [self.remote_file(data, project) for data in self.pages(
+            "/v1/mods/" + segment(project.id) + "/files", {}, code="listing_incomplete")]
 
+    @api_operation()
+    def files_for(self, project, file_id):
+        self.require_key()
+        response = self.api.get("/v1/mods/" + segment(project.id) + "/files/" + segment(file_id), missing_ok=True)
+        if response is None:
+            return []
+        file = self.remote_file(response["data"], project)
+        if file.id != str(file_id):
+            raise CourierError("verification_failed", "CurseForge returned a different file ID.", uncertain=True)
+        return [file]
+
+    @api_operation()
     def validate(self, artifacts, *, new=False):
         publication = self.publication()
         if not self.token:
@@ -189,6 +229,7 @@ class CurseForge(Connector):
                 "relations": {"projects": relations}, "isMarkedForManualRelease": False,
             }
 
+    @api_operation(write=True)
     def upload(self, project, artifact):
         publication = self.publication()
         metadata = {**self.metadata[artifact.key],
@@ -198,7 +239,7 @@ class CurseForge(Connector):
             {"metadata": metadata},
             [("file", artifact.path, artifact.hashes["sha256"])],
         )
-        if not isinstance(response, dict) or not isinstance(response.get("id"), int):
+        if not isinstance(response, dict) or type(response.get("id")) is not int or response["id"] <= 0:
             raise CourierError("invalid_response", "CurseForge did not return an uploaded file ID.", uncertain=True)
         return RemoteFile(
             str(response["id"]), publication.release_name(artifact), artifact.path.name, artifact.hashes,
@@ -206,6 +247,7 @@ class CurseForge(Connector):
             artifact.loaders, artifact.game_versions,
         )
 
+    @api_operation()
     def page_copy(self, project):
         self.require_key()
         response = self.api.get("/v1/mods/" + segment(project.id) + "/description")
@@ -214,6 +256,7 @@ class CurseForge(Connector):
             raise CourierError("invalid_response", "CurseForge did not return its project description.")
         return {"title": project.title, "summary": project.raw.get("summary", ""), "body": body}
 
+    @api_operation()
     def confirm_page(self, project_id):
         """Record the caller's browser review; HTML may differ from source Markdown."""
         publication = self.publication()
@@ -227,6 +270,7 @@ class CurseForge(Connector):
             remote_digest = digest(fields)
         return {"sha256": publication.page_sha256, "remote_sha256": remote_digest}
 
+    @api_operation()
     def page_action(self, project):
         publication = self.publication()
         review = self.settings.get("page_review", {})
