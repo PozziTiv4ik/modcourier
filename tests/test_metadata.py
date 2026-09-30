@@ -1,3 +1,4 @@
+import errno
 import json
 from pathlib import Path
 import tempfile
@@ -87,6 +88,38 @@ class MetadataTests(unittest.TestCase):
         second = read_artifact(jar(self.root, "neoforge", minecraft="1.21.2"))
         raw = suggested_config(self.root, [first, second])
         self.assertEqual(raw["artifacts"][1]["game_versions"], ["1.21.2"])
+
+    def test_init_preserves_variants_with_noncanonical_project_root(self):
+        first = read_artifact(jar(self.root, "fabric"))
+        second = read_artifact(jar(self.root, "neoforge", minecraft="1.21.2"))
+        project_root = self.root / "build" / ".."
+        raw = suggested_config(project_root, [first, second])
+        self.assertEqual([entry["path"] for entry in raw["artifacts"]],
+                         ["build/libs/demo-1.0.0-fabric.jar", "build/libs/demo-1.0.0-neoforge.jar"])
+        restored = artifacts(Config(project_root, raw))
+        self.assertEqual([item.path for item in restored], [first.path, second.path])
+        self.assertEqual([item.game_versions for item in restored], [["1.21.1"], ["1.21.2"]])
+
+    def test_init_reads_project_copy_through_directory_symlink(self):
+        project_root = self.root / "project"
+        project_root.mkdir()
+        alias = self.root / "project-alias"
+        try:
+            alias.symlink_to(project_root, target_is_directory=True)
+        except OSError as exc:
+            if (getattr(exc, "winerror", None) != 1314
+                and exc.errno not in {errno.EACCES, errno.EPERM, errno.ENOSYS, errno.ENOTSUP}):
+                raise
+            self.skipTest("Directory symlinks are unavailable on this system.")
+        (project_root / "README.en.md").write_text("English project description.", encoding="utf-8")
+        (project_root / "CHANGELOG.en.md").write_text("English release notes.", encoding="utf-8")
+        item = read_artifact(jar(alias))
+        raw = suggested_config(alias, [item])
+        self.assertEqual(raw["artifacts"][0]["path"], "build/libs/demo-1.0.0-fabric.jar")
+        cfg = Config(alias, raw)
+        self.assertEqual(cfg.text("project", "body"), "English project description.")
+        self.assertEqual(cfg.text("release", "changelog"), "English release notes.")
+        self.assertEqual(artifacts(cfg)[0].path, item.path)
 
     def test_duplicate_release_id_is_rejected(self):
         one = jar(self.root, name="one.jar")

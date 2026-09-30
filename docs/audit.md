@@ -54,6 +54,45 @@ same hash and compatibility check, and result guidance has one implementation.
 | Status and browser guidance | Missing actions or unrelated project-creation advice | Specific action codes with operation/file context |
 | Corrupt operation state or binding | Journal entries could reach execution unchecked | Report invalid_state before use |
 
+## CI notification review — 2026-09-30
+
+The repository had one remaining notification, for the initial
+[failed CI run](https://github.com/PozziTiv4ik/modcourier/actions/runs/36235535954).
+Its six Windows/macOS jobs failed in
+`test_init_preserves_variant_specific_versions`: artifact paths were resolved,
+but the project root still used an alias. Windows used a short directory name;
+macOS used `/var` for a directory resolved under `/private/var`. Comparing these
+paths with `relative_to` raised `ValueError`. All three Linux jobs passed.
+
+[Commit 9e08b2f](https://github.com/PozziTiv4ik/modcourier/commit/9e08b2f4d42ac66a8e83335ae1a08d40f747e4af)
+already fixed this by resolving the root before generating artifact paths.
+The four subsequent CI runs succeeded, including all nine jobs in the
+[1.1.0 run](https://github.com/PozziTiv4ik/modcourier/actions/runs/36321701320).
+No further application change was needed for this notification.
+
+Two dedicated regression scenarios now check the same failure condition:
+generating and reloading multiple variants through a root containing `..`, and
+reading artifact paths plus English description/changelog files through a
+directory symlink. The first scenario deterministically reproduces the original
+`ValueError` on the current machine when the normalization fix is removed in
+memory; the source files remain unchanged. The symlink scenario runs where the
+OS permits link creation and explicitly skips known permission/availability
+restrictions, including Windows error 1314.
+
+Local verification for this review used Windows and Python 3.13.13: all 124
+unittest scenarios completed successfully, with only the directory-symlink
+scenario skipped for insufficient privileges. Compilation and the standalone
+build passed. The built archive's SHA-256 matched `SHA256SUMS`; `--version`,
+`--help`, `init` and offline `inspect` ran successfully in a temporary directory
+outside the checkout with isolated Python and `PYTHONPATH` cleared.
+
+The GitHub review was limited to this repository: notification threads,
+workflow/job results and failure logs, issues, pull requests, comments on the
+failed commit and security-alert endpoints. There were no issues, pull requests,
+commit comments or open secret-scanning alerts. Code scanning had no analysis,
+and Dependabot alerts were disabled; these responses are not a vulnerability
+assessment. Neither mod platform was contacted or used for a production upload.
+
 ## Verification and limits
 
 The scenario suite uses the real CLI and HTTP transport against local fixture
